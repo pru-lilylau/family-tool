@@ -342,7 +342,7 @@
       <div class="sum-card income"><div class="lbl">所選月份收入</div><div class="val" id="sumIncome">$0</div></div>
       <div class="sum-card expense"><div class="lbl">所選月份支出</div><div class="val" id="sumExpense">$0</div></div>
       <div class="sum-card balance"><div class="lbl">現金結餘</div><div class="val" id="sumBalance">$0</div></div>
-      <div class="sum-card savings"><div class="lbl">活期本金＋應計利息</div><div class="val" id="sumSavings">$0</div></div>
+      <div class="sum-card savings"><div class="lbl">活期本金</div><div class="val" id="sumSavings">$0</div></div>
       <div class="sum-card funds"><div class="lbl">基金本金＋應計利息</div><div class="val" id="sumFunds">$0</div></div>
     </div>
 
@@ -404,7 +404,7 @@
       <div class="field"><label>起息日</label><input type="date" id="sStart"></div>
       <button class="btn ghost" onclick="addSaving()">新增戶口</button>
     </div>
-    <div class="sub" style="margin-top:6px;">應計利息按單利計算，只計到起息當月月底為止；就算過咗月底都未撳結算，金額都會停喺嗰個月嘅結算金額，唔會繼續累加，撳「結算入本金」先會將利息正式入返本金並開始計下一期</div>
+    <div class="sub" style="margin-top:6px;">應計利息按單利計算，只計到起息當月月底為止；就算過咗月底都未撳結算，金額都會停喺嗰個月嘅結算金額，唔會繼續累加。撳「結息入現金」會將利息記做現金收入，本金維持不變並開始計下一期；「結餘」同「總結餘」淨係計本金，唔會計埋未結算嘅應計利息</div>
     <div class="savings-grid" id="savingsGrid"></div>
 
     <h2 class="section">投資基金 · 每月派息</h2>
@@ -692,7 +692,7 @@ function computeBookTotal(bookId){
   const savings = ledger.savings || [];
   let balance = 0;
   transactions.forEach(t=>{ if(t.settled !== false) balance += t.type==='income' ? t.amount : -t.amount; });
-  const savingsTotal = savings.reduce((a,s)=>a + s.principal + accruedInterest(s), 0);
+  const savingsTotal = savings.reduce((a,s)=>a + s.principal, 0);
   return balance + savingsTotal;
 }
 
@@ -877,12 +877,12 @@ function accruedInterest(s){
   return s.principal * (s.rate/100) * (days/365);
 }
 
+/* 活期利息結算落現金，唔加返落本金——因為用家會每個月自己將利息攞做現金使用，唔係留喺戶口度複息 */
 function settleSaving(id){
   const s = data.savings.find(x=>x.id===id);
   if(!s) return;
   const interest = accruedInterest(s);
   if(interest <= 0) return;
-  s.principal = s.principal + interest;
   s.start = new Date().toISOString().slice(0,10);
   data.transactions.push({id:Date.now(), date: s.start, type:'income', category:'Interest', note:`${s.bank} 活期利息結算`, amount: Math.round(interest*100)/100});
   saveBook();
@@ -1146,7 +1146,8 @@ function render(){
   document.getElementById('sumExpense').textContent = fmt(monthExpense);
   document.getElementById('sumBalance').textContent = fmt(balance);
 
-  const savingsTotal = data.savings.reduce((a,s)=>a + s.principal + accruedInterest(s), 0);
+  // 結餘淨係計活期本金，唔計埋應計利息——利息會每個月結算做現金收入，落嗰陣自然反映咗喺現金結餘度
+  const savingsTotal = data.savings.reduce((a,s)=>a + s.principal, 0);
   document.getElementById('sumSavings').textContent = fmt(savingsTotal);
 
   const fundsTotal = data.funds.reduce((a,f)=>a + f.principal + fundAccrued(f), 0);
@@ -1155,7 +1156,7 @@ function render(){
   const grandTotal = balance + savingsTotal;
   document.getElementById('sumGrand').textContent = fmt(grandTotal);
   document.getElementById('grandBreakdown').innerHTML =
-    `現金 ${fmt(balance)} ＋ 活期 ${fmt(savingsTotal)}（基金 ${fmt(fundsTotal)} 另計，唔計入總結餘）`;
+    `現金 ${fmt(balance)} ＋ 活期本金 ${fmt(savingsTotal)}（基金 ${fmt(fundsTotal)} 另計，唔計入總結餘）`;
 
   renderChart(monthExpenseTx, ym);
   updateSettlePanel(ym);
@@ -1185,7 +1186,7 @@ function render(){
           <span class="val">${fmt(interest)}</span>
         </div>
         <div class="actions">
-          <button class="btn small stamp" onclick="settleSaving(${s.id})">${dueSoon ? '本月結息入本金' : '結算入本金'}</button>
+          <button class="btn small stamp" onclick="settleSaving(${s.id})">${dueSoon ? '本月結息入現金' : '提前結息入現金'}</button>
         </div>
       </div>`;
     }).join('');
