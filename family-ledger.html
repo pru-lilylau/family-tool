@@ -367,6 +367,10 @@
 
     <h2 class="section">收支明細</h2>
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap;">
+      <label for="txFilterMonth" style="font-size:12px;color:var(--ink-2);">篩選月份</label>
+      <select id="txFilterMonth" onchange="onLedgerMonthFilterChange()" style="max-width:160px;height:36px;">
+        <option value="">全部月份</option>
+      </select>
       <label for="txFilterCat" style="font-size:12px;color:var(--ink-2);">篩選項目</label>
       <select id="txFilterCat" onchange="render()" style="max-width:200px;height:36px;">
         <option value="">全部項目</option>
@@ -729,6 +733,7 @@ async function loadBook(book){
   if(!data.savings) data.savings = [];
   if(!data.funds) data.funds = [];
   if(!data.transactions) data.transactions = [];
+  ledgerMonthFilterInit = false;
   populateCategorySelect();
   onCategoryMaybeOthers();
   render();
@@ -747,6 +752,11 @@ function switchBook(book){
 }
 
 let editingTxId = null;
+let ledgerMonthFilterInit = false; // 每本存摺第一次render時，預設篩選去最近一個有記錄嘅月份，唔顯示晒全部歷史
+function onLedgerMonthFilterChange(){
+  ledgerMonthFilterInit = true; // 使用者自己揀過，之後就跟返佢揀嘅值，唔再自動覆蓋
+  render();
+}
 
 function addTx(){
   const date = document.getElementById('txDate').value;
@@ -1042,7 +1052,29 @@ function render(){
   if(allCatsUsed.includes(prevFilter)) filterSel.value = prevFilter;
   const filterCat = filterSel.value;
 
-  const displayRows = filterCat ? rows.filter(t=> (t.category || 'Others') === filterCat) : rows;
+  // 更新月份篩選選單；第一次顯示呢本存摺時，預設淨係揀最近一個有記錄嘅月份，避免成頁一次過顯示晒全部歷史
+  const monthSel = document.getElementById('txFilterMonth');
+  const prevMonthFilter = monthSel.value;
+  const allMonthsUsed = [...new Set(data.transactions.map(t=>t.date.slice(0,7)))].sort().reverse();
+  monthSel.innerHTML = '<option value="">全部月份</option>' + allMonthsUsed.map(ym=>{
+    const [y,m] = ym.split('-');
+    return `<option value="${ym}">${y}年${parseInt(m,10)}月</option>`;
+  }).join('');
+  if(!ledgerMonthFilterInit){
+    monthSel.value = allMonthsUsed[0] || '';
+    ledgerMonthFilterInit = true;
+  }else if(!prevMonthFilter || allMonthsUsed.includes(prevMonthFilter)){
+    monthSel.value = prevMonthFilter;
+  }else{
+    monthSel.value = '';
+  }
+  const monthFilter = monthSel.value;
+
+  const displayRows = rows.filter(t=>{
+    if(filterCat && (t.category || 'Others') !== filterCat) return false;
+    if(monthFilter && t.date.slice(0,7) !== monthFilter) return false;
+    return true;
+  });
 
   const filterTotalEl = document.getElementById('txFilterTotal');
   if(filterCat){
@@ -1058,7 +1090,11 @@ function render(){
 
   const tbody = document.getElementById('txBody');
   if(displayRows.length===0){
-    tbody.innerHTML = `<tr><td colspan="7" class="empty-hint">${filterCat ? '呢個項目仲未有記錄' : '仲未有記錄，喺上面新增第一筆啦'}</td></tr>`;
+    let emptyMsg = '仲未有記錄，喺上面新增第一筆啦';
+    if(filterCat && monthFilter) emptyMsg = '呢個月份入面冇呢個項目嘅記錄';
+    else if(filterCat) emptyMsg = '呢個項目仲未有記錄';
+    else if(monthFilter) emptyMsg = '呢個月份仲未有記錄';
+    tbody.innerHTML = `<tr><td colspan="7" class="empty-hint">${emptyMsg}</td></tr>`;
   }else{
     const txRowHtml = t => `
       <tr style="${t.isSettled?'':'opacity:.6;'}">
