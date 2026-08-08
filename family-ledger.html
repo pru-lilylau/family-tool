@@ -1470,9 +1470,31 @@ async function tryUnlock(){
   errEl.style.display = 'none';
   if(!pin) return;
   setSyncBadge('busy', '解鎖中…');
+
+  // 讀雲端資料呢一步同PIN冇關係，讀取失敗（Token/Gist問題、網絡問題）要分開講清楚，
+  // 唔好一律話「PIN 碼錯誤」，以免誤導
+  let content;
   try{
-    const content = await gistPull(cfg.token, cfg.gistId);
-    if(!content) throw new Error('empty');
+    content = await gistPull(cfg.token, cfg.gistId);
+  }catch(e){
+    console.error(e);
+    let msg = e.message || String(e);
+    if(msg.includes('404') || msg.includes('401') || msg.includes('403')){
+      msg += '（同PIN無關，可能係Token已過期／被撤銷，或者Gist已被刪除，可以撳「未設定同步」個位重新檢查設定）';
+    }
+    errEl.textContent = '讀取雲端資料失敗：' + msg;
+    errEl.style.display = 'block';
+    setSyncBadge('err', '同步失敗（唔關PIN事）');
+    return;
+  }
+  if(!content){
+    errEl.textContent = '搵唔到雲端資料檔案，同PIN無關，請檢查Token/Gist設定';
+    errEl.style.display = 'block';
+    setSyncBadge('err', '同步失敗（唔關PIN事）');
+    return;
+  }
+
+  try{
     const payload = await decryptWithPin(pin, content);
     applyAllData(payload);
     currentPin = pin;
@@ -1482,6 +1504,7 @@ async function tryUnlock(){
     loadBooksList().then(()=>loadBook(currentBook));
   }catch(e){
     console.error(e);
+    errEl.textContent = 'PIN 碼錯誤，請再試';
     errEl.style.display = 'block';
     setSyncBadge('err', '解鎖失敗');
   }
