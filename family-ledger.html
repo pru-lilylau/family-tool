@@ -459,9 +459,9 @@
     </div>
     <div class="card-panel family-only">
       <div>
-        <div class="lbl">信用卡代墊家庭使費（屋企欠我，未還）</div>
+        <div class="lbl" id="cardOwedLbl">信用卡代墊家庭使費（屋企欠我，未還）</div>
         <div class="val" id="cardOwedVal">$0.00</div>
-        <div style="font-size:11px;color:var(--ink-2);margin-top:2px;" id="cardOwedSub">用「我張信用卡」俾嘅家庭使費唔會即時扣戶口結餘，等你撳「由家庭資金還款」先一次過扣。「我個人使費」永遠唔會扣屋企戶口</div>
+        <div style="font-size:11px;color:var(--ink-2);margin-top:2px;" id="cardOwedSub">用「我張信用卡」俾嘅家庭使費唔會即時扣戶口結餘，等你撳「由家庭資金還款」先一次過由呢本簿轉去你嗰本簿。「我個人使費」永遠唔會扣屋企戶口</div>
       </div>
       <button class="btn small" style="background:#8A6E9F;" onclick="reimburseCard()">由家庭資金還款</button>
     </div>
@@ -1039,7 +1039,29 @@ function renderInterestHistory(){
 }
 
 /* ===================== 信用卡代墊 → 由家庭資金還款 ===================== */
+/* 用 Lily 張信用卡俾嘅家庭使費淨係記喺「自己家庭」呢本簿，付款方式／歸屬同紫色面板淨係喺呢本顯示 */
+function cardExpenseBookId(){
+  return (books.find(b=>b.id==='family') || books.find(b=>b.group==='family') || books[0])?.id;
+}
+/* 還款收款人：Lily 嗰本簿（按名搵，搵唔到就問一次並記住） */
+function cardHolderBookId(askIfMissing){
+  if(account.cardHolderId && books.some(b=>b.id===account.cardHolderId)) return account.cardHolderId;
+  const byName = books.find(b=>/lily/i.test(b.name) && b.id!==cardExpenseBookId());
+  if(byName) return byName.id;
+  if(!askIfMissing) return null;
+  const others = books.filter(b=>b.id!==cardExpenseBookId());
+  const name = prompt('還款要轉去邊本簿？請輸入名稱：\n' + others.map(b=>b.name).join(' / '));
+  const picked = name && others.find(b=>b.name===name.trim());
+  if(!picked){ if(name!==null) alert('搵唔到呢本簿'); return null; }
+  account.cardHolderId = picked.id;
+  saveAccount();
+  return picked.id;
+}
+
 function reimburseCard(){
+  const holderId = cardHolderBookId(true);
+  if(!holderId) return;
+  const holderName = books.find(b=>b.id===holderId).name;
   const owed = data.transactions.filter(isCardOwed);
   if(owed.length===0){ alert('冇未還嘅信用卡代墊家庭使費'); return; }
   const cutoff = prompt('還款包括邊日或之前嘅信用卡記錄？（YYYY-MM-DD，例如月結單截數日）', todayStr());
@@ -1048,12 +1070,18 @@ function reimburseCard(){
   const picked = owed.filter(t=>t.date <= cutoff);
   if(picked.length===0){ alert('呢個日期或之前冇未還嘅記錄'); return; }
   const total = round2(picked.reduce((a,t)=>a + t.amount, 0));
-  if(!confirm(`會由家庭資金轉 ${fmt(total)} 俾你，還返 ${picked.length} 筆信用卡代墊（${cutoff} 或之前）。\n\n記得喺銀行真係過數。確定？`)) return;
+  if(!confirm(`會由「${books.find(b=>b.id===currentBook).name}」轉 ${fmt(total)} 去「${holderName}」，還返 ${picked.length} 筆信用卡代墊（${cutoff} 或之前）。\n\n兩本簿會各記一筆。確定？`)) return;
   const id = Date.now();
-  data.transactions.push({ id, date: todayStr(), type:'transfer', category:'信用卡代墊還款',
-    note:`還 ${picked.length} 筆信用卡代墊（截至 ${cutoff}）`, amount: total, settled:false });
+  const date = todayStr();
+  data.transactions.push({ id, date, type:'transfer', category:'信用卡代墊還款',
+    note:`轉去${holderName}：還 ${picked.length} 筆信用卡代墊（截至 ${cutoff}）`, amount: total, settled:true, payee: holderId });
   picked.forEach(t=>{ t.reimbursedBy = id; });
   saveBook();
+  // 喺 Lily 簿記返一筆收入，同一個戶口入面由家庭份額轉去 Lily 份額，對數唔受影響
+  const holder = getLedger(holderId);
+  holder.transactions.push({ id: id+1, date, type:'income', category:'信用卡代墊還款',
+    note:`屋企還信用卡代墊 ${picked.length} 筆（截至 ${cutoff}）`, amount: total, settled:true, reimburseOf: id });
+  putLedger(holderId, holder);
   render();
 }
 
@@ -1127,7 +1155,7 @@ function addTx(){
   const otherCat = document.getElementById('txOtherCat').value.trim();
   const note = document.getElementById('txNote').value.trim();
   const amount = parseFloat(document.getElementById('txAmount').value);
-  const isFamilyBook = books.find(b=>b.id===currentBook)?.group === 'family';
+  const isFamilyBook = currentBook === cardExpenseBookId();
   const payer = isFamilyBook && type==='expense' ? document.getElementById('txPayer').value : 'account';
   const owner = isFamilyBook && type==='expense' ? document.getElementById('txOwner').value : 'family';
   if(category === 'Others' && otherCat) category = otherCat;
@@ -1156,7 +1184,7 @@ function addTx(){
 function editTx(id){
   const t = data.transactions.find(x=>x.id===id);
   if(!t) return;
-  if(t.type==='transfer'){ alert('還款記錄唔可以編輯；如果有錯，可以刪除再重新撳「由家庭資金還款」'); return; }
+  if(t.type==='transfer' || t.reimburseOf){ alert('還款記錄唔可以編輯；如果有錯，可以喺「自己家庭」刪除嗰筆還款，再重新撳「由家庭資金還款」'); return; }
   editingTxId = id;
   document.getElementById('txDate').value = t.date;
   document.getElementById('txType').value = t.type;
@@ -1192,13 +1220,26 @@ function delTx(id){
     return;
   }
   if(t.interestRun && !confirm('呢筆係共用戶口利息分配，淨係刪除呢筆會令分配加總唔等於銀行實收。建議喺「戶口總覽」刪除成次分配。仍然刪除？')) return;
+  if(t.reimburseOf){
+    alert('呢筆係屋企還信用卡代墊嘅收入，要刪除請去「自己家庭」刪除嗰筆「信用卡代墊還款」，兩邊會一齊刪。');
+    return;
+  }
   if(t.type==='transfer'){
-    if(!confirm('刪除呢筆還款之後，包含嘅信用卡代墊會變返「未還」。確定？')) return;
+    if(!confirm('刪除呢筆還款之後，包含嘅信用卡代墊會變返「未還」，收款嗰本簿嘅對應記錄亦會一齊刪除。確定？')) return;
     data.transactions.forEach(x=>{ if(x.reimbursedBy===id) delete x.reimbursedBy; });
   }
   data.transactions = data.transactions.filter(t=>t.id!==id);
   if(editingTxId===id) cancelEditTx();
   saveBook();
+  if(t.type==='transfer'){
+    books.forEach(b=>{
+      if(b.id===currentBook) return;
+      const ledger = getLedger(b.id);
+      const before = ledger.transactions.length;
+      ledger.transactions = ledger.transactions.filter(x=>x.reimburseOf!==id);
+      if(ledger.transactions.length!==before) putLedger(b.id, ledger);
+    });
+  }
   render();
 }
 
@@ -1486,7 +1527,7 @@ function render(){
         <td data-label="日期">${t.date}</td>
         <td data-label="項目/備註">
           <div style="text-align:left;">
-            <span class="cat-badge">${t.category || 'Others'}</span>${t.payer==='card' ? '<span class="tag card">💳 信用卡</span>' : ''}${t.owner==='personal' ? '<span class="tag personal">個人</span>' : ''}${t.payer==='card' && t.owner!=='personal' && t.type==='expense' ? (t.reimbursedBy ? '<span class="tag paid">已還</span>' : '<span class="tag card">未還</span>') : ''}${t.type==='transfer' ? '<span class="tag xfer">戶口轉俾我</span>' : ''}
+            <span class="cat-badge">${t.category || 'Others'}</span>${t.payer==='card' ? '<span class="tag card">💳 信用卡</span>' : ''}${t.owner==='personal' ? '<span class="tag personal">個人</span>' : ''}${t.payer==='card' && t.owner!=='personal' && t.type==='expense' ? (t.reimbursedBy ? '<span class="tag paid">已還</span>' : '<span class="tag card">未還</span>') : ''}${t.type==='transfer' ? '<span class="tag xfer">轉去'+escHtml(books.find(b=>b.id===t.payee)?.name || 'Lily')+'</span>' : ''}${t.reimburseOf ? '<span class="tag xfer">屋企還款</span>' : ''}
             ${t.note ? `<span class="tx-note">${t.note}</span>` : ''}
           </div>
         </td>
@@ -1536,9 +1577,13 @@ function render(){
   personalEl.textContent = '另：我個人 ' + fmt(monthPersonal);
 
   // 家庭類存摺先顯示付款方式／歸屬同信用卡代墊面板
-  const isFamilyBook = books.find(b=>b.id===currentBook)?.group === 'family';
+  const isFamilyBook = currentBook === cardExpenseBookId();
   document.querySelectorAll('.family-only').forEach(el=>{ el.style.display = isFamilyBook ? '' : 'none'; });
   const owedTx = data.transactions.filter(isCardOwed);
+  if(isFamilyBook){
+    const holder = books.find(b=>b.id===cardHolderBookId(false));
+    document.getElementById('cardOwedLbl').textContent = `信用卡代墊家庭使費（屋企欠${holder ? holder.name : '我'}，未還）`;
+  }
   document.getElementById('cardOwedVal').textContent = fmt(owedTx.reduce((a,t)=>a+t.amount,0));
   document.getElementById('sumBalance').textContent = fmt(balance);
 
