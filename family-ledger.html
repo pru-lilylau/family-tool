@@ -460,7 +460,7 @@
       <div class="sum-card expense"><div class="lbl">所選月份支出</div><div class="val" id="sumExpense">$0</div><div class="lbl" id="sumPersonal" style="margin:4px 0 0;display:none;"></div></div>
       <div class="sum-card balance"><div class="lbl">現金結餘</div><div class="val" id="sumBalance">$0</div></div>
       <div class="sum-card savings"><div class="lbl">活期本金</div><div class="val" id="sumSavings">$0</div></div>
-      <div class="sum-card funds"><div class="lbl">基金結餘</div><div class="val" id="sumFunds">$0</div></div>
+      <div class="sum-card funds"><div class="lbl">基金本金＋應計利息</div><div class="val" id="sumFunds">$0</div></div>
     </div>
     <div class="rollforward" id="bookRoll"></div>
 
@@ -1196,7 +1196,7 @@ function memberFundTotal(bookId){
     return a + (h ? h.principal : 0) + fundPaidTo(f, bookId);
   }, 0);
   const ownLedger = getLedger(bookId);
-  const own = ownLedger.funds.reduce((a,f)=>a + fundValue(f), 0) + keptFundYield(ownLedger);
+  const own = ownLedger.funds.reduce((a,f)=>a + f.principal, 0) + keptFundYield(ownLedger);
   return joint + own;
 }
 
@@ -1731,16 +1731,6 @@ function addFund(){
   render();
 }
 
-/* 基金結餘 ＝ 本金（＋ 本月應計利息，如果呢隻基金剔咗「計入基金結餘」） */
-function fundValue(f){ return f.principal + (f.includeAccrued ? fundAccrued(f) : 0); }
-function toggleFundAccrued(id, checked){
-  const f = data.funds.find(x=>x.id===id);
-  if(!f) return;
-  f.includeAccrued = checked;
-  saveBook();
-  render();
-}
-
 function delFund(id){
   data.funds = data.funds.filter(f=>f.id!==id);
   saveBook();
@@ -2007,7 +1997,7 @@ function render(){
     const h = f.holdings.find(x=>x.id===currentBook);
     return a + (h ? h.principal : 0) + fundPaidTo(f, currentBook);
   }, 0);
-  const fundsTotal = data.funds.reduce((a,f)=>a + fundValue(f), 0) + keptFundYield(data) + jointFundShare;
+  const fundsTotal = data.funds.reduce((a,f)=>a + f.principal + fundAccrued(f), 0) + keptFundYield(data) + jointFundShare;
   document.getElementById('sumFunds').textContent = fmt(fundsTotal);
 
   const grandTotal = balance + savingsTotal;
@@ -2074,11 +2064,6 @@ function render(){
           <span style="font-size:11px;color:var(--ink-2)">本月應計</span>
           <span class="val">${fmt(accrued)}</span>
         </div>
-        <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-2);margin-top:8px;cursor:pointer;">
-          <input type="checkbox" ${f.includeAccrued?'checked':''} onchange="toggleFundAccrued(${f.id}, this.checked)">
-          應計利息計入基金結餘
-        </label>
-        <div class="row"><span>${f.includeAccrued ? '本金＋應計利息' : '本金（未計應計利息）'}</span><b>${fmt(fundValue(f))}</b></div>
         <div class="actions">
           <button class="btn small stamp" onclick="settleFund(${f.id})">${dueSoon ? '記錄本月派息' : '提前記錄派息'}</button>
         </div>
