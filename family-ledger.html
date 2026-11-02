@@ -126,6 +126,7 @@
   details.acct-panel > summary .s-sub{font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:500;color:var(--ink-2);}
   details.acct-panel .acct-inner{padding-bottom:18px;}
   table.acct-tbl{width:100%;border-collapse:collapse;font-size:13px;}
+  table.acct-tbl th, table.acct-tbl td{white-space:nowrap;}
   table.acct-tbl th{font-size:11px;color:var(--ink-2);font-weight:500;text-align:left;padding:6px 6px;border-bottom:1px solid var(--line);}
   table.acct-tbl td{padding:8px 6px;border-bottom:1px dashed var(--line);}
   table.acct-tbl .num{text-align:right;font-family:'JetBrains Mono',monospace;white-space:nowrap;}
@@ -381,7 +382,7 @@
       <div class="table-scroll" style="margin-top:0;">
         <table class="acct-tbl" id="acctSharesTbl"></table>
       </div>
-      <p class="acct-hint">「戶口份額」＝ 每本存摺嘅現金結餘（只計已結算）＋ 活期本金，唔包括基金。取消剔選「喺戶口」嘅成員唔會計入合計，亦唔會分到利息。</p>
+      <p class="acct-hint">「戶口份額」＝ 現金（每本存摺嘅現金結餘，只計已結算）＋ 活期（活期本金），唔包括基金。取消剔選「喺戶口」嘅成員唔會計入合計，亦唔會分到利息。</p>
 
       <h2 class="section">每月結餘（承上／轉下）</h2>
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
@@ -856,11 +857,14 @@ function putLedger(bookId, ledger){
   scheduleSync();
 }
 
-function computeBookTotal(bookId){
+function bookBreakdown(bookId){
   const ledger = getLedger(bookId);
-  const balance = ledger.transactions.reduce((a,t)=>a + txCashEffect(t), 0);
-  const savingsTotal = ledger.savings.reduce((a,s)=>a + s.principal, 0);
-  return balance + savingsTotal;
+  const cash = ledger.transactions.reduce((a,t)=>a + txCashEffect(t), 0);
+  const savings = ledger.savings.reduce((a,s)=>a + s.principal, 0);
+  return { cash, savings, total: cash + savings };
+}
+function computeBookTotal(bookId){
+  return bookBreakdown(bookId).total;
 }
 
 /* ===================== 共用銀行戶口：對數 + 利息分配 ===================== */
@@ -948,20 +952,24 @@ function renderBookRoll(ym){
 function renderAccountPanel(){
   const tbl = document.getElementById('acctSharesTbl');
   if(!tbl) return;
-  const rows = books.map(b=>({ b, total: computeBookTotal(b.id), inAcct: b.inAccount !== false }));
+  const rows = books.map(b=>({ b, ...bookBreakdown(b.id), inAcct: b.inAccount !== false }));
   const sum = rows.filter(r=>r.inAcct).reduce((a,r)=>a + r.total, 0);
+  const sumCash = rows.filter(r=>r.inAcct).reduce((a,r)=>a + r.cash, 0);
+  const sumSav = rows.filter(r=>r.inAcct).reduce((a,r)=>a + r.savings, 0);
   const cardOwed = books.reduce((a,b)=> a + getLedger(b.id).transactions.filter(isCardOwed).reduce((x,t)=>x+t.amount,0), 0);
   tbl.innerHTML = `
-    <thead><tr><th>喺戶口</th><th>成員</th><th class="num">戶口份額</th><th class="num">佔比</th></tr></thead>
+    <thead><tr><th>喺戶口</th><th>成員</th><th class="num">現金</th><th class="num">活期</th><th class="num">戶口份額</th><th class="num">佔比</th></tr></thead>
     <tbody>
       ${rows.map(r=>`
         <tr style="${r.inAcct?'':'opacity:.5;'}">
           <td><input type="checkbox" ${r.inAcct?'checked':''} onchange="toggleInAccount('${r.b.id}', this.checked)"></td>
           <td><span style="display:inline-block;width:9px;height:9px;border-radius:3px;background:${r.b.color};margin-right:6px;"></span>${escHtml(r.b.name)}</td>
-          <td class="num">${fmt(r.total)}</td>
+          <td class="num">${fmt(r.cash)}</td>
+          <td class="num">${fmt(r.savings)}</td>
+          <td class="num"><b>${fmt(r.total)}</b></td>
           <td class="num">${r.inAcct && sum>0 ? (r.total/sum*100).toFixed(1)+'%' : '—'}</td>
         </tr>`).join('')}
-      <tr class="total"><td></td><td>合計</td><td class="num">${fmt(sum)}</td><td class="num">100%</td></tr>
+      <tr class="total"><td></td><td>合計</td><td class="num">${fmt(sumCash)}</td><td class="num">${fmt(sumSav)}</td><td class="num">${fmt(sum)}</td><td class="num">100%</td></tr>
     </tbody>`;
 
   const recon = document.getElementById('acctRecon');
