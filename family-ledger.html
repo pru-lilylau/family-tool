@@ -460,7 +460,7 @@
       <div class="sum-card expense"><div class="lbl">所選月份支出</div><div class="val" id="sumExpense">$0</div><div class="lbl" id="sumPersonal" style="margin:4px 0 0;display:none;"></div></div>
       <div class="sum-card balance"><div class="lbl">現金結餘</div><div class="val" id="sumBalance">$0</div></div>
       <div class="sum-card savings"><div class="lbl">活期本金</div><div class="val" id="sumSavings">$0</div></div>
-      <div class="sum-card funds"><div class="lbl">基金（本金＋派息＋應計）</div><div class="val" id="sumFunds">$0</div></div>
+      <div class="sum-card funds"><div class="lbl">基金（本金＋派息）</div><div class="val" id="sumFunds">$0</div></div>
     </div>
     <div class="rollforward" id="bookRoll"></div>
 
@@ -1798,13 +1798,7 @@ function monthlyYield(f){
   return f.principal * (f.rate/100) / 12;
 }
 
-function fundAccrued(f){
-  const days = Math.max(0,(Date.now() - new Date(f.start).getTime())/86400000);
-  const fraction = Math.min(1, days/30);
-  return monthlyYield(f) * fraction;
-}
-
-/* 基金派息係單利，唔加返落本金（先至唔會愈滾愈多），只當現金收入記落帳，並開始計下一期 */
+/* 基金派息係單利，唔加返落本金；記低嘅派息留喺基金戶口，計入基金結餘，並開始計下一期 */
 function settleFund(id){
   const f = data.funds.find(x=>x.id===id);
   if(!f) return;
@@ -2033,7 +2027,8 @@ function render(){
     const h = f.holdings.find(x=>x.id===currentBook);
     return a + (h ? h.principal : 0) + fundPaidTo(f, currentBook);
   }, 0);
-  const fundsTotal = data.funds.reduce((a,f)=>a + f.principal + fundAccrued(f), 0) + keptFundYield(data) + jointFundShare;
+  // 基金結餘只計本金同已記嘅派息，唔計應計利息
+  const fundsTotal = data.funds.reduce((a,f)=>a + f.principal, 0) + keptFundYield(data) + jointFundShare;
   document.getElementById('sumFunds').textContent = fmt(fundsTotal);
 
   const grandTotal = balance + savingsTotal;
@@ -2081,7 +2076,6 @@ function render(){
     fundsGrid.innerHTML = `<div class="empty-hint">未有投資基金，喺上面新增一個</div>`;
   }else{
     fundsGrid.innerHTML = data.funds.map(f=>{
-      const accrued = fundAccrued(f);
       const days = Math.max(0, Math.floor((Date.now()-new Date(f.start).getTime())/86400000));
       const monthly = monthlyYield(f);
       const nextPayout = new Date(new Date(f.start).getTime() + 30*86400000);
@@ -2097,10 +2091,9 @@ function render(){
         <div class="row"><span>每月派息</span><b>${fmt(monthly)}</b></div>
         <div class="row"><span>下次派息日</span><b>${nextPayout.toISOString().slice(0,10)}</b></div>
         <div class="row"><span>已記派息（留喺基金）</span><b>${fmt(fundYieldOf(f, data))}</b></div>
-        <div class="row"><span>基金結餘（本金＋派息）</span><b>${fmt(f.principal + fundYieldOf(f, data))}</b></div>
         <div class="accrued">
-          <span style="font-size:11px;color:var(--ink-2)">本月應計</span>
-          <span class="val">${fmt(accrued)}</span>
+          <span style="font-size:11px;color:var(--ink-2)">基金結餘（本金＋派息）</span>
+          <span class="val">${fmt(f.principal + fundYieldOf(f, data))}</span>
         </div>
         <div class="actions">
           <button class="btn small stamp" onclick="settleFund(${f.id})">${dueSoon ? '記錄本月派息' : '提前記錄派息'}</button>
