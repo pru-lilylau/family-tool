@@ -460,7 +460,7 @@
       <div class="sum-card expense"><div class="lbl">所選月份支出</div><div class="val" id="sumExpense">$0</div><div class="lbl" id="sumPersonal" style="margin:4px 0 0;display:none;"></div></div>
       <div class="sum-card balance"><div class="lbl">現金結餘</div><div class="val" id="sumBalance">$0</div></div>
       <div class="sum-card savings"><div class="lbl">活期本金</div><div class="val" id="sumSavings">$0</div></div>
-      <div class="sum-card funds"><div class="lbl">基金本金＋應計利息</div><div class="val" id="sumFunds">$0</div></div>
+      <div class="sum-card funds"><div class="lbl">基金（本金＋派息＋應計）</div><div class="val" id="sumFunds">$0</div></div>
     </div>
     <div class="rollforward" id="bookRoll"></div>
 
@@ -863,6 +863,12 @@ function updateSourceField(){
 function isFundYieldKept(t){ return t.type==='income' && t.category==='Fund Yield' && !t.toFund; }
 function keptFundYield(ledger){
   return ledger.transactions.filter(t=>isFundYieldKept(t) && t.settled !== false).reduce((a,t)=>a + t.amount, 0);
+}
+/* 某隻獨立基金已經記咗入簿嘅派息：新記錄用 fundId 連住；舊記錄冇 fundId，就按備註開頭嘅基金名配對 */
+function fundYieldOf(f, ledger){
+  return ledger.transactions.filter(t=>isFundYieldKept(t) && t.settled !== false &&
+    (t.fundId === f.id || (!t.fundId && (t.note||'').startsWith(f.name + ' 每月派息'))))
+    .reduce((a,t)=>a + t.amount, 0);
 }
 function isFamilyExpense(t){ return t.type==='expense' && t.owner !== 'personal'; }
 function isCardOwed(t){ return t.type==='expense' && t.payer==='card' && t.owner!=='personal' && !t.reimbursedBy; }
@@ -1775,7 +1781,7 @@ function settleFund(id){
   const payout = monthlyYield(f);
   if(payout <= 0) return;
   f.start = new Date().toISOString().slice(0,10);
-  data.transactions.push({id:Date.now(), date: f.start, type:'income', category:'Fund Yield', note:`${f.name} 每月派息（留喺基金戶口）`, amount: Math.round(payout*100)/100, settled:true});
+  data.transactions.push({id:Date.now(), date: f.start, type:'income', category:'Fund Yield', note:`${f.name} 每月派息（留喺基金戶口）`, amount: Math.round(payout*100)/100, settled:true, fundId: f.id});
   saveBook();
   render();
 }
@@ -2060,6 +2066,8 @@ function render(){
         <div class="row"><span>年化Yield</span><b>${f.rate}%</b></div>
         <div class="row"><span>每月派息</span><b>${fmt(monthly)}</b></div>
         <div class="row"><span>下次派息日</span><b>${nextPayout.toISOString().slice(0,10)}</b></div>
+        <div class="row"><span>已記派息（留喺基金）</span><b>${fmt(fundYieldOf(f, data))}</b></div>
+        <div class="row"><span>基金結餘（本金＋已記派息）</span><b>${fmt(f.principal + fundYieldOf(f, data))}</b></div>
         <div class="accrued">
           <span style="font-size:11px;color:var(--ink-2)">本月應計</span>
           <span class="val">${fmt(accrued)}</span>
