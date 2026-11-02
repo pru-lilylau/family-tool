@@ -158,6 +158,20 @@
   .settle-panel .val{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:18px;color:var(--gold);}
 
   .summary{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:22px;}
+  .rollforward{
+    display:flex;align-items:stretch;flex-wrap:wrap;gap:0;border:1px solid var(--line);border-radius:8px;
+    background:var(--card);margin:-10px 0 22px;overflow:hidden;
+  }
+  .rollforward .rf-item{flex:1 1 110px;padding:10px 12px;border-right:1px dashed var(--line);min-width:0;}
+  .rollforward .rf-item:last-child{border-right:none;}
+  .rollforward .rf-item.end{background:var(--paper-2);}
+  .rollforward .lbl{font-size:11px;color:var(--ink-2);margin-bottom:3px;white-space:nowrap;}
+  .rollforward .val{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:14px;white-space:nowrap;}
+  .rollforward .val.plus{color:var(--income);}
+  .rollforward .val.minus{color:var(--expense);}
+  @media(max-width:600px){
+    .rollforward .rf-item{flex:1 1 45%;border-bottom:1px dashed var(--line);}
+  }
   @media (max-width:680px){.summary{grid-template-columns:repeat(2,1fr);}}
   .sum-card{
     background:var(--paper-2);border:1px solid var(--line);border-radius:8px;
@@ -369,6 +383,16 @@
       </div>
       <p class="acct-hint">「戶口份額」＝ 每本存摺嘅現金結餘（只計已結算）＋ 活期本金，唔包括基金。取消剔選「喺戶口」嘅成員唔會計入合計，亦唔會分到利息。</p>
 
+      <h2 class="section">每月結餘（承上／轉下）</h2>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+        <label for="rollMonth" style="font-size:12px;color:var(--ink-2);">月份</label>
+        <input type="month" id="rollMonth" style="max-width:160px;height:34px;border:1px solid var(--line);border-radius:6px;padding:0 8px;" onchange="renderAccountPanel()">
+      </div>
+      <div class="table-scroll" style="margin-top:0;">
+        <table class="acct-tbl" id="rollTbl"></table>
+      </div>
+      <p class="acct-hint">承上 ＋ 存入 ＋ 利息 − 支出 ＝ 轉下。全部計現金＋活期本金（只計已結算記錄），唔包括基金。</p>
+
       <h2 class="section">同月結單對數</h2>
       <div class="add-save-form">
         <div class="field"><label>月結單日期</label><input type="date" id="stmtDate"></div>
@@ -413,6 +437,7 @@
       <div class="sum-card savings"><div class="lbl">活期本金</div><div class="val" id="sumSavings">$0</div></div>
       <div class="sum-card funds"><div class="lbl">基金本金＋應計利息</div><div class="val" id="sumFunds">$0</div></div>
     </div>
+    <div class="rollforward" id="bookRoll"></div>
 
     <h2 class="section">新增記錄</h2>
     <div class="form-row">
@@ -865,6 +890,61 @@ function toggleInAccount(bookId, checked){
   renderAccountPanel();
 }
 
+/* ===================== 承上／轉下（balance carry forward） ===================== */
+function prevMonthEnd(ym){
+  const [y,m] = ym.split('-').map(Number);
+  const d = new Date(y, m-1, 0);
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+}
+/* 由而家嘅總額倒推：某月 承上 ＝ 上月尾結餘，轉下 ＝ 本月尾結餘；中間按記錄分存入／利息／支出 */
+function monthRollforward(bookId, ym){
+  const ledger = getLedger(bookId);
+  const now = computeBookTotal(bookId);
+  const monthEnd = ym + '-' + String(daysInMonth(ym)).padStart(2,'0');
+  const bfDate = prevMonthEnd(ym);
+  let afterBf = 0, afterCf = 0, inflow = 0, interest = 0, outflow = 0;
+  ledger.transactions.forEach(t=>{
+    const e = txTotalEffect(t, ledger);
+    if(e === 0) return;
+    if(t.date > bfDate) afterBf += e;
+    if(t.date > monthEnd) afterCf += e;
+    if(t.date.slice(0,7) === ym){
+      if(e > 0 && t.category === 'Interest') interest += e;
+      else if(e > 0) inflow += e;
+      else outflow -= e;
+    }
+  });
+  return { bf: now - afterBf, inflow, interest, outflow, cf: now - afterCf };
+}
+
+function renderRollTable(){
+  const tbl = document.getElementById('rollTbl');
+  const ym = document.getElementById('rollMonth').value;
+  if(!tbl || !ym) return;
+  const rows = acctBooks().map(b=>({ b, r: monthRollforward(b.id, ym) }));
+  const sum = k => rows.reduce((a,x)=>a + x.r[k], 0);
+  const cell = (v, cls) => `<td class="num ${cls||''}">${fmt(v)}</td>`;
+  tbl.innerHTML = `
+    <thead><tr><th>成員</th><th class="num">承上</th><th class="num">存入</th><th class="num">利息</th><th class="num">支出</th><th class="num">轉下</th></tr></thead>
+    <tbody>
+      ${rows.map(({b,r})=>`<tr><td>${escHtml(b.name)}</td>${cell(r.bf)}${cell(r.inflow)}${cell(r.interest)}${cell(r.outflow)}<td class="num"><b>${fmt(r.cf)}</b></td></tr>`).join('')}
+      <tr class="total"><td>合計</td>${cell(sum('bf'))}${cell(sum('inflow'))}${cell(sum('interest'))}${cell(sum('outflow'))}${cell(sum('cf'))}</tr>
+    </tbody>`;
+}
+
+function renderBookRoll(ym){
+  const el = document.getElementById('bookRoll');
+  if(!el || !currentBook) return;
+  const r = monthRollforward(currentBook, ym);
+  const [y,m] = ym.split('-');
+  const item = (lbl, v, cls, extra) => `<div class="rf-item ${extra||''}"><div class="lbl">${lbl}</div><div class="val ${cls||''}">${fmt(v)}</div></div>`;
+  el.innerHTML = item(`承上（${parseInt(m,10)}月初）`, r.bf, '', 'end')
+    + item('＋ 存入', r.inflow, 'plus')
+    + item('＋ 利息', r.interest, 'plus')
+    + item('− 支出', r.outflow, 'minus')
+    + item(`轉下（${parseInt(m,10)}月尾）`, r.cf, '', 'end');
+}
+
 function renderAccountPanel(){
   const tbl = document.getElementById('acctSharesTbl');
   if(!tbl) return;
@@ -901,6 +981,7 @@ function renderAccountPanel(){
   }
   document.getElementById('acctSummaryLine').textContent = summary;
   renderInterestHistory();
+  renderRollTable();
 }
 
 function saveStatement(){
@@ -1614,7 +1695,8 @@ function render(){
         const mIncome = monthRows.filter(r=>r.type==='income').reduce((a,b)=>a+b.amount,0);
         const mExpense = monthRows.filter(isFamilyExpense).reduce((a,b)=>a+b.amount,0);
         const mPersonal = monthRows.filter(r=>r.type==='expense' && r.owner==='personal').reduce((a,b)=>a+b.amount,0);
-        html += `<tr class="month-group-row"><td colspan="7">${y}年${parseInt(m,10)}月<span class="m-sub">收入 ${fmt(mIncome)} ・ 支出 ${fmt(mExpense)}${mPersonal>0 ? ' ・ 個人 '+fmt(mPersonal) : ''}</span></td></tr>`;
+        const rf = monthRollforward(currentBook, rowYm);
+        html += `<tr class="month-group-row"><td colspan="7">${y}年${parseInt(m,10)}月<span class="m-sub">承上 ${fmt(rf.bf)} ・ 收入 ${fmt(mIncome)} ・ 支出 ${fmt(mExpense)}${mPersonal>0 ? ' ・ 個人 '+fmt(mPersonal) : ''} ・ 轉下 ${fmt(rf.cf)}</span></td></tr>`;
       }
       html += txRowHtml(t);
     });
@@ -1658,6 +1740,7 @@ function render(){
     `現金 ${fmt(balance)} ＋ 活期本金 ${fmt(savingsTotal)}（基金 ${fmt(fundsTotal)} 另計，唔計入總結餘）`;
 
   renderChart(monthExpenseTx, ym);
+  renderBookRoll(ym);
   updateSettlePanel(ym);
 
   const grid = document.getElementById('savingsGrid');
@@ -1731,6 +1814,7 @@ document.getElementById('stmtDate').value = todayStr();
   // 預設揀上個月：通常月頭先收到上個月嘅利息
   const d = new Date(); d.setDate(1); d.setMonth(d.getMonth()-1);
   document.getElementById('intMonth').value = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0');
+  document.getElementById('rollMonth').value = todayYm();
   const panel = document.getElementById('acctPanel');
   try{ if(localStorage.getItem('ui:acctOpen')==='1') panel.open = true; }catch(e){}
   panel.addEventListener('toggle', ()=>{ try{ localStorage.setItem('ui:acctOpen', panel.open?'1':'0'); }catch(e){} });
