@@ -558,7 +558,7 @@
       <button class="btn ghost" onclick="addFund()">新增基金</button>
     </div>
     <div class="sub" style="margin-top:6px;color:var(--stamp);">同其他人一齊持有嘅基金（例如你同媽媽合買），請改用上面「📈 共同基金」記錄同分派息，呢度淨係記一個人獨自持有嘅基金，唔好兩邊都記。</div>
-    <div class="sub" style="margin-top:6px;">基金每月派息一次（單利計算，唔會複息），派息日到咗會標示「可以派息」，撳掣就會將當月派息記做現金收入，本金維持不變</div>
+    <div class="sub" style="margin-top:6px;">基金每月派息一次（單利計算，唔會複息），派息日到咗會標示「可以派息」，撳掣就會喺收支明細記低當月派息。派息一直留喺基金戶口，所以唔計入現金結餘，而係加落「基金」嗰格，本金維持不變</div>
     <div class="savings-grid" id="fundsGrid"></div>
 
     <div style="margin-top:26px;padding-top:16px;border-top:1px dashed var(--line);text-align:center;">
@@ -834,7 +834,7 @@ function txCashEffect(t){
   if(t.settled === false) return 0;
   if(t.fromSaving) return 0; // 喺活期本金度扣，本金已經即時減咗，唔再扣現金結餘
   if(t.toSaving) return 0;   // 利息已經直接加落活期本金
-  if(t.toFund) return 0;     // 基金派息留喺基金戶口，唔入銀行戶口
+  if(t.toFund || isFundYieldKept(t)) return 0; // 基金派息留喺基金戶口，唔入銀行戶口
   if(t.type === 'income') return t.amount;
   if(t.type === 'transfer') return -t.amount;
   if(t.payer === 'card') return 0;
@@ -858,6 +858,11 @@ function updateSourceField(){
   const isExpense = document.getElementById('txType').value === 'expense';
   const isCard = document.getElementById('txPayer').value === 'card' && currentBook === cardExpenseBookId();
   document.getElementById('sourceField').style.display = (isExpense && !isCard && data.savings.length>0) ? '' : 'none';
+}
+/* 獨立基金卡嘅派息（包括以前撳「派息入現金」記低嗰啲）：錢一直留喺基金戶口，唔計現金結餘 */
+function isFundYieldKept(t){ return t.type==='income' && t.category==='Fund Yield' && !t.toFund; }
+function keptFundYield(ledger){
+  return ledger.transactions.filter(t=>isFundYieldKept(t) && t.settled !== false).reduce((a,t)=>a + t.amount, 0);
 }
 function isFamilyExpense(t){ return t.type==='expense' && t.owner !== 'personal'; }
 function isCardOwed(t){ return t.type==='expense' && t.payer==='card' && t.owner!=='personal' && !t.reimbursedBy; }
@@ -1190,7 +1195,8 @@ function memberFundTotal(bookId){
     const h = f.holdings.find(x=>x.id===bookId);
     return a + (h ? h.principal : 0) + fundPaidTo(f, bookId);
   }, 0);
-  const own = getLedger(bookId).funds.reduce((a,f)=>a + f.principal, 0);
+  const ownLedger = getLedger(bookId);
+  const own = ownLedger.funds.reduce((a,f)=>a + f.principal, 0) + keptFundYield(ownLedger);
   return joint + own;
 }
 
@@ -1769,7 +1775,7 @@ function settleFund(id){
   const payout = monthlyYield(f);
   if(payout <= 0) return;
   f.start = new Date().toISOString().slice(0,10);
-  data.transactions.push({id:Date.now(), date: f.start, type:'income', category:'Fund Yield', note:`${f.name} 每月派息`, amount: Math.round(payout*100)/100});
+  data.transactions.push({id:Date.now(), date: f.start, type:'income', category:'Fund Yield', note:`${f.name} 每月派息（留喺基金戶口）`, amount: Math.round(payout*100)/100, settled:true});
   saveBook();
   render();
 }
@@ -1921,7 +1927,7 @@ function render(){
         <td data-label="日期">${t.date}</td>
         <td data-label="項目/備註">
           <div style="text-align:left;">
-            <span class="cat-badge">${t.category || 'Others'}</span>${t.payer==='card' ? '<span class="tag card">💳 信用卡</span>' : ''}${t.owner==='personal' ? '<span class="tag personal">個人</span>' : ''}${t.payer==='card' && t.owner!=='personal' && t.type==='expense' ? (t.reimbursedBy ? '<span class="tag paid">已還</span>' : '<span class="tag card">未還</span>') : ''}${t.type==='transfer' ? '<span class="tag xfer">轉去'+escHtml(books.find(b=>b.id===t.payee)?.name || 'Lily')+'</span>' : ''}${t.reimburseOf ? '<span class="tag xfer">屋企還款</span>' : ''}${t.toFund ? '<span class="tag xfer">留喺基金：'+escHtml(account.jointFunds.find(f=>f.id===t.toFund)?.name || '已刪除')+'</span>' : ''}${t.toSaving ? '<span class="tag xfer">入活期：'+escHtml(data.savings.find(sv=>sv.id===t.toSaving)?.bank || '已刪除')+'</span>' : ''}${t.fromSaving ? '<span class="tag xfer">活期扣：'+escHtml(data.savings.find(sv=>sv.id===t.fromSaving)?.bank || '已刪除')+'</span>' : ''}
+            <span class="cat-badge">${t.category || 'Others'}</span>${t.payer==='card' ? '<span class="tag card">💳 信用卡</span>' : ''}${t.owner==='personal' ? '<span class="tag personal">個人</span>' : ''}${t.payer==='card' && t.owner!=='personal' && t.type==='expense' ? (t.reimbursedBy ? '<span class="tag paid">已還</span>' : '<span class="tag card">未還</span>') : ''}${t.type==='transfer' ? '<span class="tag xfer">轉去'+escHtml(books.find(b=>b.id===t.payee)?.name || 'Lily')+'</span>' : ''}${t.reimburseOf ? '<span class="tag xfer">屋企還款</span>' : ''}${t.toFund ? '<span class="tag xfer">留喺基金：'+escHtml(account.jointFunds.find(f=>f.id===t.toFund)?.name || '已刪除')+'</span>' : ''}${isFundYieldKept(t) ? '<span class="tag xfer">留喺基金</span>' : ''}${t.toSaving ? '<span class="tag xfer">入活期：'+escHtml(data.savings.find(sv=>sv.id===t.toSaving)?.bank || '已刪除')+'</span>' : ''}${t.fromSaving ? '<span class="tag xfer">活期扣：'+escHtml(data.savings.find(sv=>sv.id===t.fromSaving)?.bank || '已刪除')+'</span>' : ''}
             ${t.note ? `<span class="tx-note">${t.note}</span>` : ''}
           </div>
         </td>
@@ -1929,7 +1935,7 @@ function render(){
         <td class="amt plus" data-label="收入">${t.type==='income'?fmt(t.amount):''}</td>
         <td class="amt bal" data-label="結餘">${fmt(t.runningBalance)}</td>
         <td data-label="狀態" style="text-align:center;font-size:11px;">
-          ${t.fromSaving || t.toSaving || t.toFund ? `<span style="color:var(--income);white-space:nowrap;">${t.fromSaving ? '已扣活期' : t.toSaving ? '已入活期' : '已入基金'}</span>` : `<label style="display:flex;align-items:center;gap:4px;justify-content:center;cursor:pointer;white-space:nowrap;">
+          ${t.fromSaving || t.toSaving || t.toFund || isFundYieldKept(t) ? `<span style="color:var(--income);white-space:nowrap;">${t.fromSaving ? '已扣活期' : t.toSaving ? '已入活期' : '已入基金'}</span>` : `<label style="display:flex;align-items:center;gap:4px;justify-content:center;cursor:pointer;white-space:nowrap;">
             <input type="checkbox" ${t.isSettled?'checked':''} onchange="toggleSettled(${t.id}, this.checked)">
             <span style="color:${t.isSettled?'var(--income)':'var(--gold)'};">${t.isSettled?'已結算':'待結算'}</span>
           </label>`}
@@ -1991,7 +1997,7 @@ function render(){
     const h = f.holdings.find(x=>x.id===currentBook);
     return a + (h ? h.principal : 0) + fundPaidTo(f, currentBook);
   }, 0);
-  const fundsTotal = data.funds.reduce((a,f)=>a + f.principal + fundAccrued(f), 0) + jointFundShare;
+  const fundsTotal = data.funds.reduce((a,f)=>a + f.principal + fundAccrued(f), 0) + keptFundYield(data) + jointFundShare;
   document.getElementById('sumFunds').textContent = fmt(fundsTotal);
 
   const grandTotal = balance + savingsTotal;
@@ -2059,7 +2065,7 @@ function render(){
           <span class="val">${fmt(accrued)}</span>
         </div>
         <div class="actions">
-          <button class="btn small stamp" onclick="settleFund(${f.id})">${dueSoon ? '本月派息入現金' : '提前派息入現金'}</button>
+          <button class="btn small stamp" onclick="settleFund(${f.id})">${dueSoon ? '記錄本月派息' : '提前記錄派息'}</button>
         </div>
       </div>`;
     }).join('');
