@@ -383,7 +383,7 @@
         <div class="field"><label>銀行實收利息 (HKD)</label><input type="number" id="intAmount" placeholder="月結單上嘅利息" step="0.01"></div>
         <button class="btn ghost" onclick="previewInterest()">計算分配</button>
       </div>
-      <p class="acct-hint">每位成員嘅日均結餘按佢存摺入面已結算記錄嘅日期逐日計（活期本金當成全月都喺度）。你可以喺預覽表直接改日均結餘再確認。確認後，每人會喺自己存摺多一筆已結算嘅「Interest」收入，日期係月底，所以下個月計息嗰陣會自動包埋呢筆利息（本息滾存）。分完剩低嘅尾數會撥歸自己家庭。</p>
+      <p class="acct-hint">每位成員嘅日均結餘按佢存摺入面記錄嘅日期逐日計。你可以喺預覽表直接改日均結餘再確認。確認後，利息會直接加落每人嘅活期本金（有幾個活期就入第一個；冇活期嘅成員就入現金結餘），同時喺收支明細留一筆「Interest」記錄，日期係月底，所以下個月計息嗰陣會自動包埋呢筆利息（本息滾存）。分完剩低嘅尾數會撥歸自己家庭。</p>
       <div id="intPreview"></div>
       <div id="intHistory" style="margin-top:12px;"></div>
     </div>
@@ -781,15 +781,17 @@ function renderTabs(){
    - transfer（信用卡代墊還款）係由戶口過錢俾自己，扣結餘但唔當開支 */
 function txCashEffect(t){
   if(t.settled === false) return 0;
+  if(t.fromSaving) return 0; // 喺活期本金度扣，本金已經即時減咗，唔再扣現金結餘
+  if(t.toSaving) return 0;   // 利息已經直接加落活期本金
   if(t.type === 'income') return t.amount;
   if(t.type === 'transfer') return -t.amount;
   if(t.payer === 'card') return 0;
-  if(t.fromSaving) return 0; // 喺活期本金度扣，本金已經即時減咗，唔再扣現金結餘
   return -t.amount;
 }
 /* 一筆記錄對成本存摺總額（現金＋活期）嘅影響，用嚟倒推過去某日嘅結餘 */
 function txTotalEffect(t, ledger){
   if(t.fromSaving && t.settled !== false && ledger.savings.some(s=>s.id===t.fromSaving)) return -t.amount;
+  if(t.toSaving && ledger.savings.some(s=>s.id===t.toSaving)) return t.amount;
   return txCashEffect(t);
 }
 function adjustSaving(savingId, delta){
@@ -985,7 +987,7 @@ function renderInterestPreview(keepFocus){
       <div style="font-size:13px;font-weight:700;margin-bottom:6px;">${y}年${parseInt(m,10)}月 利息 ${fmt(interestDraft.amount)} 分配預覽</div>
       <div class="table-scroll" style="margin-top:0;">
       <table class="acct-tbl">
-        <thead><tr><th>成員</th><th class="num">日均結餘（可改）</th><th class="num">佔比</th><th class="num">分到利息</th></tr></thead>
+        <thead><tr><th>成員</th><th class="num">日均結餘（可改）</th><th class="num">佔比</th><th class="num">分到利息</th><th>入去</th></tr></thead>
         <tbody>
           ${interestDraft.members.map((mm,i)=>`
             <tr>
@@ -993,6 +995,7 @@ function renderInterestPreview(keepFocus){
               <td class="num"><input type="number" step="0.01" value="${mm.weight}" oninput="onWeightEdit(${i}, this.value)"></td>
               <td class="num" id="intPct_${i}">${alloc ? alloc[i].pct.toFixed(2)+'%' : '—'}</td>
               <td class="num" id="intAmt_${i}">${alloc ? fmt(alloc[i].amount) : '—'}</td>
+              <td style="font-size:11.5px;white-space:nowrap;">${(()=>{ const sv = getLedger(mm.id).savings[0]; return sv ? '活期：'+escHtml(sv.bank) : '現金結餘'; })()}</td>
             </tr>`).join('')}
         </tbody>
       </table>
@@ -1009,6 +1012,10 @@ function removeInterestTx(ym){
   books.forEach(b=>{
     const ledger = getLedger(b.id);
     const before = ledger.transactions.length;
+    ledger.transactions.filter(t=>t.interestRun === ym && t.toSaving).forEach(t=>{
+      const sv = ledger.savings.find(x=>x.id===t.toSaving);
+      if(sv) sv.principal = round2(sv.principal - t.amount);
+    });
     ledger.transactions = ledger.transactions.filter(t=>t.interestRun !== ym);
     if(ledger.transactions.length !== before) putLedger(b.id, ledger);
   });
@@ -1026,11 +1033,14 @@ function confirmInterest(){
   alloc.forEach((a,i)=>{
     if(a.amount === 0) return;
     const ledger = getLedger(a.id);
-    ledger.transactions.push({
+    const sv = ledger.savings[0];
+    const tx = {
       id: baseId + i, date: monthEnd, type:'income', category:'Interest',
-      note: `${ym} 共用戶口利息分配（日均結餘 ${fmt(a.weight)}，佔 ${a.pct.toFixed(2)}%）`,
+      note: `${ym} 共用戶口利息分配（日均結餘 ${fmt(a.weight)}，佔 ${a.pct.toFixed(2)}%）${sv ? '，已加落活期本金' : ''}`,
       amount: a.amount, settled: true, interestRun: ym
-    });
+    };
+    if(sv){ tx.toSaving = sv.id; sv.principal = round2(sv.principal + a.amount); }
+    ledger.transactions.push(tx);
     putLedger(a.id, ledger);
   });
   account.interestRuns.push({ ym, amount: interestDraft.amount, postedOn: todayStr(),
@@ -1225,6 +1235,7 @@ function editTx(id){
   const t = data.transactions.find(x=>x.id===id);
   if(!t) return;
   if(t.type==='transfer' || t.reimburseOf){ alert('還款記錄唔可以編輯；如果有錯，可以喺「自己家庭」刪除嗰筆還款，再重新撳「由家庭資金還款」'); return; }
+  if(t.interestRun){ alert('利息分配記錄唔可以單獨編輯；請喺「🏦 共用銀行戶口總覽」重新計同一個月份，會自動取代舊記錄'); return; }
   editingTxId = id;
   document.getElementById('txDate').value = t.date;
   document.getElementById('txType').value = t.type;
@@ -1271,6 +1282,7 @@ function delTx(id){
     data.transactions.forEach(x=>{ if(x.reimbursedBy===id) delete x.reimbursedBy; });
   }
   if(t.fromSaving) adjustSaving(t.fromSaving, t.amount);
+  if(t.toSaving) adjustSaving(t.toSaving, -t.amount);
   data.transactions = data.transactions.filter(t=>t.id!==id);
   if(editingTxId===id) cancelEditTx();
   saveBook();
@@ -1304,8 +1316,8 @@ function addSaving(){
 }
 
 function delSaving(id){
-  const linked = data.transactions.filter(t=>t.fromSaving===id).length;
-  if(linked && !confirm(`有 ${linked} 筆支出係喺呢個活期扣，刪除之後佢哋唔會再影響結餘。確定刪除？`)) return;
+  const linked = data.transactions.filter(t=>t.fromSaving===id || t.toSaving===id).length;
+  if(linked && !confirm(`有 ${linked} 筆記錄（活期扣款或利息）連住呢個活期，刪除之後佢哋唔會再影響結餘。確定刪除？`)) return;
   data.savings = data.savings.filter(s=>s.id!==id);
   saveBook();
   render();
@@ -1573,7 +1585,7 @@ function render(){
         <td data-label="日期">${t.date}</td>
         <td data-label="項目/備註">
           <div style="text-align:left;">
-            <span class="cat-badge">${t.category || 'Others'}</span>${t.payer==='card' ? '<span class="tag card">💳 信用卡</span>' : ''}${t.owner==='personal' ? '<span class="tag personal">個人</span>' : ''}${t.payer==='card' && t.owner!=='personal' && t.type==='expense' ? (t.reimbursedBy ? '<span class="tag paid">已還</span>' : '<span class="tag card">未還</span>') : ''}${t.type==='transfer' ? '<span class="tag xfer">轉去'+escHtml(books.find(b=>b.id===t.payee)?.name || 'Lily')+'</span>' : ''}${t.reimburseOf ? '<span class="tag xfer">屋企還款</span>' : ''}${t.fromSaving ? '<span class="tag xfer">活期扣：'+escHtml(data.savings.find(sv=>sv.id===t.fromSaving)?.bank || '已刪除')+'</span>' : ''}
+            <span class="cat-badge">${t.category || 'Others'}</span>${t.payer==='card' ? '<span class="tag card">💳 信用卡</span>' : ''}${t.owner==='personal' ? '<span class="tag personal">個人</span>' : ''}${t.payer==='card' && t.owner!=='personal' && t.type==='expense' ? (t.reimbursedBy ? '<span class="tag paid">已還</span>' : '<span class="tag card">未還</span>') : ''}${t.type==='transfer' ? '<span class="tag xfer">轉去'+escHtml(books.find(b=>b.id===t.payee)?.name || 'Lily')+'</span>' : ''}${t.reimburseOf ? '<span class="tag xfer">屋企還款</span>' : ''}${t.toSaving ? '<span class="tag xfer">入活期：'+escHtml(data.savings.find(sv=>sv.id===t.toSaving)?.bank || '已刪除')+'</span>' : ''}${t.fromSaving ? '<span class="tag xfer">活期扣：'+escHtml(data.savings.find(sv=>sv.id===t.fromSaving)?.bank || '已刪除')+'</span>' : ''}
             ${t.note ? `<span class="tx-note">${t.note}</span>` : ''}
           </div>
         </td>
@@ -1581,7 +1593,7 @@ function render(){
         <td class="amt plus" data-label="收入">${t.type==='income'?fmt(t.amount):''}</td>
         <td class="amt bal" data-label="結餘">${fmt(t.runningBalance)}</td>
         <td data-label="狀態" style="text-align:center;font-size:11px;">
-          ${t.fromSaving ? '<span style="color:var(--income);white-space:nowrap;">已扣活期</span>' : `<label style="display:flex;align-items:center;gap:4px;justify-content:center;cursor:pointer;white-space:nowrap;">
+          ${t.fromSaving || t.toSaving ? `<span style="color:var(--income);white-space:nowrap;">${t.fromSaving ? '已扣活期' : '已入活期'}</span>` : `<label style="display:flex;align-items:center;gap:4px;justify-content:center;cursor:pointer;white-space:nowrap;">
             <input type="checkbox" ${t.isSettled?'checked':''} onchange="toggleSettled(${t.id}, this.checked)">
             <span style="color:${t.isSettled?'var(--income)':'var(--gold)'};">${t.isSettled?'已結算':'待結算'}</span>
           </label>`}
