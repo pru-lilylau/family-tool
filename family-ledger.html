@@ -429,7 +429,7 @@
       <div class="field" id="othersField" style="display:none;"><label>自訂項目</label><input type="text" id="txOtherCat" placeholder="輸入項目名稱"></div>
       <div class="field" id="noteField"><label>備註</label><input type="text" id="txNote" placeholder="例：街市買餸 / 十二月人工"></div>
       <div class="field family-only"><label>付款方式</label>
-        <select id="txPayer">
+        <select id="txPayer" onchange="updateSourceField()">
           <option value="account">屋企戶口</option>
           <option value="card">我張信用卡</option>
         </select>
@@ -439,6 +439,9 @@
           <option value="family">家庭使費</option>
           <option value="personal">我個人使費</option>
         </select>
+      </div>
+      <div class="field" id="sourceField" style="display:none;"><label>扣款來源</label>
+        <select id="txSource"></select>
       </div>
       <div class="field"><label>金額 (HKD)</label><input type="number" id="txAmount" placeholder="0.00" step="0.01"></div>
       <button class="btn stamp" id="txSubmitBtn" onclick="addTx()">蓋章記帳</button>
@@ -662,6 +665,7 @@ function populateCategorySelect(){
 function onTypeChange(){
   populateCategorySelect();
   onCategoryMaybeOthers();
+  updateSourceField();
 }
 
 function onCategoryMaybeOthers(){
@@ -780,7 +784,26 @@ function txCashEffect(t){
   if(t.type === 'income') return t.amount;
   if(t.type === 'transfer') return -t.amount;
   if(t.payer === 'card') return 0;
+  if(t.fromSaving) return 0; // 喺活期本金度扣，本金已經即時減咗，唔再扣現金結餘
   return -t.amount;
+}
+/* 一筆記錄對成本存摺總額（現金＋活期）嘅影響，用嚟倒推過去某日嘅結餘 */
+function txTotalEffect(t, ledger){
+  if(t.fromSaving && t.settled !== false && ledger.savings.some(s=>s.id===t.fromSaving)) return -t.amount;
+  return txCashEffect(t);
+}
+function adjustSaving(savingId, delta){
+  const sv = data.savings.find(x=>x.id===savingId);
+  if(sv) sv.principal = round2(sv.principal + delta);
+}
+function updateSourceField(){
+  const sel = document.getElementById('txSource');
+  const prev = sel.value;
+  sel.innerHTML = '<option value="">現金結餘</option>' + data.savings.map(sv=>`<option value="${sv.id}">活期本金：${escHtml(sv.bank)}</option>`).join('');
+  if([...sel.options].some(o=>o.value===prev)) sel.value = prev;
+  const isExpense = document.getElementById('txType').value === 'expense';
+  const isCard = document.getElementById('txPayer').value === 'card' && currentBook === cardExpenseBookId();
+  document.getElementById('sourceField').style.display = (isExpense && !isCard && data.savings.length>0) ? '' : 'none';
 }
 function isFamilyExpense(t){ return t.type==='expense' && t.owner !== 'personal'; }
 function isCardOwed(t){ return t.type==='expense' && t.payer==='card' && t.owner!=='personal' && !t.reimbursedBy; }
@@ -890,18 +913,21 @@ function saveStatement(){
   renderAccountPanel();
 }
 
-/* 某本存摺喺某月嘅日均結餘：逐日計「已結算記錄（日期 ≤ 嗰日）嘅現金影響 ＋ 活期本金」再平均；
+/* 某本存摺喺某月嘅日均結餘：逐日計嗰日完結時嘅現金＋活期本金再平均；
    同一個月之前分過嘅利息唔計（重新分配時用） */
 function avgDailyBalance(bookId, ym){
+  // 由而家嘅總額（現金＋活期）倒推：某日結餘 ＝ 而家總額 − 嗰日之後記錄嘅影響。
+  // 咁樣喺活期本金度直接扣嘅支出都會按日期計返啱
   const ledger = getLedger(bookId);
-  const savingsTotal = ledger.savings.reduce((a,s)=>a + s.principal, 0);
-  const txs = ledger.transactions.filter(t=>t.interestRun !== ym).slice().sort((a,b)=>a.date.localeCompare(b.date));
+  const excluded = ledger.transactions.filter(t=>t.interestRun === ym);
+  const base = computeBookTotal(bookId) - excluded.reduce((a,t)=>a + txTotalEffect(t, ledger), 0);
+  const txs = ledger.transactions.filter(t=>t.interestRun !== ym);
   const n = daysInMonth(ym);
-  let i = 0, running = 0, total = 0;
+  let total = 0;
   for(let d=1; d<=n; d++){
     const ds = ym + '-' + String(d).padStart(2,'0');
-    while(i < txs.length && txs[i].date <= ds){ running += txCashEffect(txs[i]); i++; }
-    total += running + savingsTotal;
+    const after = txs.filter(t=>t.date > ds).reduce((a,t)=>a + txTotalEffect(t, ledger), 0);
+    total += base - after;
   }
   return total / n;
 }
@@ -1070,9 +1096,13 @@ function reimburseCard(){
   const picked = owed.filter(t=>t.date <= cutoff);
   if(picked.length===0){ alert('呢個日期或之前冇未還嘅記錄'); return; }
   const total = round2(picked.reduce((a,t)=>a + t.amount, 0));
-  if(!confirm(`會由「${books.find(b=>b.id===currentBook).name}」轉 ${fmt(total)} 去「${holderName}」，還返 ${picked.length} 筆信用卡代墊（${cutoff} 或之前）。\n\n兩本簿會各記一筆。確定？`)) return;
+  const ym = todayYm();
+  const monthEnd = ym + '-' + String(daysInMonth(ym)).padStart(2,'0');
+  const date = prompt('還款日期？（YYYY-MM-DD，預設本月月尾）', monthEnd);
+  if(date===null) return;
+  if(!isValidDateStr(date)){ alert('日期格式有誤'); return; }
+  if(!confirm(`${date} 由「${books.find(b=>b.id===currentBook).name}」轉 ${fmt(total)} 去「${holderName}」，還返 ${picked.length} 筆信用卡代墊（${cutoff} 或之前）。\n\n兩本簿會各記一筆。確定？`)) return;
   const id = Date.now();
-  const date = todayStr();
   data.transactions.push({ id, date, type:'transfer', category:'信用卡代墊還款',
     note:`轉去${holderName}：還 ${picked.length} 筆信用卡代墊（截至 ${cutoff}）`, amount: total, settled:true, payee: holderId });
   picked.forEach(t=>{ t.reimbursedBy = id; });
@@ -1158,6 +1188,8 @@ function addTx(){
   const isFamilyBook = currentBook === cardExpenseBookId();
   const payer = isFamilyBook && type==='expense' ? document.getElementById('txPayer').value : 'account';
   const owner = isFamilyBook && type==='expense' ? document.getElementById('txOwner').value : 'family';
+  const srcVal = document.getElementById('sourceField').style.display !== 'none' ? document.getElementById('txSource').value : '';
+  const fromSaving = type==='expense' && payer!=='card' && srcVal ? Number(srcVal) : null;
   if(category === 'Others' && otherCat) category = otherCat;
   if(!date || !isValidDateStr(date) || !category || isNaN(amount) || amount<=0){
     alert('請填妥日期（格式 YYYY-MM-DD）、項目同金額');
@@ -1169,10 +1201,18 @@ function addTx(){
       alert('呢筆信用卡代墊已經還咗款，唔可以改金額、日期、付款方式或歸屬。如果要改，請先刪除嗰筆「信用卡代墊還款」記錄。');
       return;
     }
-    if(t){ Object.assign(t, {date, type, category, note, amount, payer, owner}); }
+    if(t){
+      if(t.fromSaving) adjustSaving(t.fromSaving, t.amount); // 先還返舊金額落活期，再按新資料扣
+      Object.assign(t, {date, type, category, note, amount, payer, owner});
+      if(fromSaving){ t.fromSaving = fromSaving; t.settled = true; adjustSaving(fromSaving, -amount); }
+      else delete t.fromSaving;
+    }
     cancelEditTx();
   }else{
-    data.transactions.push({id:Date.now(), date, type, category, note, amount, payer, owner, settled:false});
+    const t = {id:Date.now(), date, type, category, note, amount, payer, owner, settled:false};
+    // 喺活期本金度扣嘅支出即時扣本金，當已結算
+    if(fromSaving){ t.fromSaving = fromSaving; t.settled = true; adjustSaving(fromSaving, -amount); }
+    data.transactions.push(t);
     document.getElementById('txOtherCat').value='';
     document.getElementById('txNote').value='';
     document.getElementById('txAmount').value='';
@@ -1198,6 +1238,8 @@ function editTx(id){
   document.getElementById('txAmount').value = t.amount;
   document.getElementById('txPayer').value = t.payer || 'account';
   document.getElementById('txOwner').value = t.owner || 'family';
+  updateSourceField();
+  document.getElementById('txSource').value = t.fromSaving && data.savings.some(sv=>sv.id===t.fromSaving) ? String(t.fromSaving) : '';
   document.getElementById('txSubmitBtn').textContent = '更新記錄';
   document.getElementById('txCancelEditBtn').style.display = 'inline-flex';
   document.getElementById('txDate').scrollIntoView({behavior:'smooth', block:'center'});
@@ -1228,6 +1270,7 @@ function delTx(id){
     if(!confirm('刪除呢筆還款之後，包含嘅信用卡代墊會變返「未還」，收款嗰本簿嘅對應記錄亦會一齊刪除。確定？')) return;
     data.transactions.forEach(x=>{ if(x.reimbursedBy===id) delete x.reimbursedBy; });
   }
+  if(t.fromSaving) adjustSaving(t.fromSaving, t.amount);
   data.transactions = data.transactions.filter(t=>t.id!==id);
   if(editingTxId===id) cancelEditTx();
   saveBook();
@@ -1261,6 +1304,8 @@ function addSaving(){
 }
 
 function delSaving(id){
+  const linked = data.transactions.filter(t=>t.fromSaving===id).length;
+  if(linked && !confirm(`有 ${linked} 筆支出係喺呢個活期扣，刪除之後佢哋唔會再影響結餘。確定刪除？`)) return;
   data.savings = data.savings.filter(s=>s.id!==id);
   saveBook();
   render();
@@ -1462,6 +1507,7 @@ function renderChart(monthExpenseTx, ym){
 }
 
 function render(){
+  updateSourceField();
   const sorted = [...data.transactions].sort((a,b)=> a.date===b.date ? a.id-b.id : a.date.localeCompare(b.date));
   let balance = 0;
   const rows = sorted.map(t=>{
@@ -1527,7 +1573,7 @@ function render(){
         <td data-label="日期">${t.date}</td>
         <td data-label="項目/備註">
           <div style="text-align:left;">
-            <span class="cat-badge">${t.category || 'Others'}</span>${t.payer==='card' ? '<span class="tag card">💳 信用卡</span>' : ''}${t.owner==='personal' ? '<span class="tag personal">個人</span>' : ''}${t.payer==='card' && t.owner!=='personal' && t.type==='expense' ? (t.reimbursedBy ? '<span class="tag paid">已還</span>' : '<span class="tag card">未還</span>') : ''}${t.type==='transfer' ? '<span class="tag xfer">轉去'+escHtml(books.find(b=>b.id===t.payee)?.name || 'Lily')+'</span>' : ''}${t.reimburseOf ? '<span class="tag xfer">屋企還款</span>' : ''}
+            <span class="cat-badge">${t.category || 'Others'}</span>${t.payer==='card' ? '<span class="tag card">💳 信用卡</span>' : ''}${t.owner==='personal' ? '<span class="tag personal">個人</span>' : ''}${t.payer==='card' && t.owner!=='personal' && t.type==='expense' ? (t.reimbursedBy ? '<span class="tag paid">已還</span>' : '<span class="tag card">未還</span>') : ''}${t.type==='transfer' ? '<span class="tag xfer">轉去'+escHtml(books.find(b=>b.id===t.payee)?.name || 'Lily')+'</span>' : ''}${t.reimburseOf ? '<span class="tag xfer">屋企還款</span>' : ''}${t.fromSaving ? '<span class="tag xfer">活期扣：'+escHtml(data.savings.find(sv=>sv.id===t.fromSaving)?.bank || '已刪除')+'</span>' : ''}
             ${t.note ? `<span class="tx-note">${t.note}</span>` : ''}
           </div>
         </td>
@@ -1535,10 +1581,10 @@ function render(){
         <td class="amt plus" data-label="收入">${t.type==='income'?fmt(t.amount):''}</td>
         <td class="amt bal" data-label="結餘">${fmt(t.runningBalance)}</td>
         <td data-label="狀態" style="text-align:center;font-size:11px;">
-          <label style="display:flex;align-items:center;gap:4px;justify-content:center;cursor:pointer;white-space:nowrap;">
+          ${t.fromSaving ? '<span style="color:var(--income);white-space:nowrap;">已扣活期</span>' : `<label style="display:flex;align-items:center;gap:4px;justify-content:center;cursor:pointer;white-space:nowrap;">
             <input type="checkbox" ${t.isSettled?'checked':''} onchange="toggleSettled(${t.id}, this.checked)">
             <span style="color:${t.isSettled?'var(--income)':'var(--gold)'};">${t.isSettled?'已結算':'待結算'}</span>
-          </label>
+          </label>`}
         </td>
         <td data-label="操作"><div><button class="del-btn" onclick="editTx(${t.id})" title="編輯" style="margin-right:6px;">✏️</button><button class="del-btn" onclick="delTx(${t.id})" title="刪除">✕</button></div></td>
       </tr>`;
