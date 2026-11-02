@@ -414,6 +414,30 @@
     </div>
   </details>
 
+  <details class="acct-panel" id="fundPanel">
+    <summary><span class="s-title">📈 共同基金</span><span class="s-sub" id="fundSummaryLine"></span></summary>
+    <div class="acct-inner">
+      <div id="jointFundsList"></div>
+
+      <h2 class="section">每月派息分配（按本金比例）</h2>
+      <div class="add-save-form">
+        <div class="field"><label>基金</label><select id="fpFund"></select></div>
+        <div class="field"><label>派息月份</label><input type="month" id="fpMonth"></div>
+        <div class="field"><label>實收派息 (HKD)</label><input type="number" id="fpAmount" placeholder="基金月結單上嘅派息" step="0.01"></div>
+        <button class="btn ghost" onclick="previewFundPayout()">計算分配</button>
+      </div>
+      <p class="acct-hint">派息按每人本金佔比分，記入各人存摺做「Fund Yield」收入，日期係月底。因為派息留喺基金戶口，所以唔會計入銀行戶口份額同對數，而係加落各人嘅「基金結餘」。分完剩低嘅尾數會撥歸 Lily（冇就撥俾本金最多嗰位）。</p>
+      <div id="fundPayoutPreview"></div>
+
+      <h2 class="section">新增共同基金</h2>
+      <div class="add-save-form">
+        <div class="field"><label>基金名稱</label><input type="text" id="jfName" placeholder="例：貨幣市場基金"></div>
+      </div>
+      <div class="add-save-form" id="jfHoldingInputs" style="margin-top:10px;"></div>
+      <div style="margin-top:10px;"><button class="btn ghost" onclick="addJointFund()">新增共同基金</button></div>
+    </div>
+  </details>
+
   <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
     <div class="tabs" id="tabsBar" style="flex:1;"></div>
     <button class="btn small ghost" onclick="openMemberManager()" style="margin-bottom:6px;">排序成員</button>
@@ -533,6 +557,7 @@
       <div class="field"><label>起始日</label><input type="date" id="fStart"></div>
       <button class="btn ghost" onclick="addFund()">新增基金</button>
     </div>
+    <div class="sub" style="margin-top:6px;color:var(--stamp);">同其他人一齊持有嘅基金（例如你同媽媽合買），請改用上面「📈 共同基金」記錄同分派息，呢度淨係記一個人獨自持有嘅基金，唔好兩邊都記。</div>
     <div class="sub" style="margin-top:6px;">基金每月派息一次（單利計算，唔會複息），派息日到咗會標示「可以派息」，撳掣就會將當月派息記做現金收入，本金維持不變</div>
     <div class="savings-grid" id="fundsGrid"></div>
 
@@ -809,6 +834,7 @@ function txCashEffect(t){
   if(t.settled === false) return 0;
   if(t.fromSaving) return 0; // 喺活期本金度扣，本金已經即時減咗，唔再扣現金結餘
   if(t.toSaving) return 0;   // 利息已經直接加落活期本金
+  if(t.toFund) return 0;     // 基金派息留喺基金戶口，唔入銀行戶口
   if(t.type === 'income') return t.amount;
   if(t.type === 'transfer') return -t.amount;
   if(t.payer === 'card') return 0;
@@ -875,6 +901,7 @@ function loadAccount(){
     account = raw ? JSON.parse(raw) : { statement:null, interestRuns:[] };
   }catch(e){ account = { statement:null, interestRuns:[] }; }
   if(!account.interestRuns) account.interestRuns = [];
+  if(!account.jointFunds) account.jointFunds = [];
 }
 function saveAccount(){
   try{ localStorage.setItem('account:meta', JSON.stringify(account)); }
@@ -952,13 +979,14 @@ function renderBookRoll(ym){
 function renderAccountPanel(){
   const tbl = document.getElementById('acctSharesTbl');
   if(!tbl) return;
-  const rows = books.map(b=>({ b, ...bookBreakdown(b.id), inAcct: b.inAccount !== false }));
+  const rows = books.map(b=>({ b, ...bookBreakdown(b.id), fund: memberFundTotal(b.id), inAcct: b.inAccount !== false }));
+  const sumFund = rows.reduce((a,r)=>a + r.fund, 0);
   const sum = rows.filter(r=>r.inAcct).reduce((a,r)=>a + r.total, 0);
   const sumCash = rows.filter(r=>r.inAcct).reduce((a,r)=>a + r.cash, 0);
   const sumSav = rows.filter(r=>r.inAcct).reduce((a,r)=>a + r.savings, 0);
   const cardOwed = books.reduce((a,b)=> a + getLedger(b.id).transactions.filter(isCardOwed).reduce((x,t)=>x+t.amount,0), 0);
   tbl.innerHTML = `
-    <thead><tr><th>喺戶口</th><th>成員</th><th class="num">現金</th><th class="num">活期</th><th class="num">戶口份額</th><th class="num">佔比</th></tr></thead>
+    <thead><tr><th>喺戶口</th><th>成員</th><th class="num">現金</th><th class="num">活期</th><th class="num">戶口份額</th><th class="num">佔比</th><th class="num">基金</th><th class="num">總資產</th></tr></thead>
     <tbody>
       ${rows.map(r=>`
         <tr style="${r.inAcct?'':'opacity:.5;'}">
@@ -968,8 +996,10 @@ function renderAccountPanel(){
           <td class="num">${fmt(r.savings)}</td>
           <td class="num"><b>${fmt(r.total)}</b></td>
           <td class="num">${r.inAcct && sum>0 ? (r.total/sum*100).toFixed(1)+'%' : '—'}</td>
+          <td class="num">${fmt(r.fund)}</td>
+          <td class="num"><b>${fmt(r.total + r.fund)}</b></td>
         </tr>`).join('')}
-      <tr class="total"><td></td><td>合計</td><td class="num">${fmt(sumCash)}</td><td class="num">${fmt(sumSav)}</td><td class="num">${fmt(sum)}</td><td class="num">100%</td></tr>
+      <tr class="total"><td></td><td>合計</td><td class="num">${fmt(sumCash)}</td><td class="num">${fmt(sumSav)}</td><td class="num">${fmt(sum)}</td><td class="num">100%</td><td class="num">${fmt(sumFund)}</td><td class="num">${fmt(sum + sumFund)}</td></tr>
     </tbody>`;
 
   const recon = document.getElementById('acctRecon');
@@ -990,6 +1020,7 @@ function renderAccountPanel(){
   document.getElementById('acctSummaryLine').textContent = summary;
   renderInterestHistory();
   renderRollTable();
+  renderJointFunds();
 }
 
 function saveStatement(){
@@ -1146,6 +1177,220 @@ function deleteInterestRun(ym){
   removeInterestTx(ym);
   saveAccount();
   render();
+}
+
+/* ===================== 共同基金：按本金比例分派息 ===================== */
+function fundPrincipalTotal(f){ return f.holdings.reduce((a,h)=>a + h.principal, 0); }
+function fundPaidTo(f, bookId){
+  return f.payouts.reduce((a,p)=>a + (p.alloc.find(x=>x.id===bookId)?.amount || 0), 0);
+}
+/* 每人喺共同基金嘅結餘 ＝ 本金 ＋ 累計派息（派息留喺基金戶口）；另加佢自己存摺入面嘅獨立基金本金 */
+function memberFundTotal(bookId){
+  const joint = account.jointFunds.reduce((a,f)=>{
+    const h = f.holdings.find(x=>x.id===bookId);
+    return a + (h ? h.principal : 0) + fundPaidTo(f, bookId);
+  }, 0);
+  const own = getLedger(bookId).funds.reduce((a,f)=>a + f.principal, 0);
+  return joint + own;
+}
+
+function renderJointFundInputs(){
+  const el = document.getElementById('jfHoldingInputs');
+  if(!el) return;
+  const prev = {};
+  el.querySelectorAll('input[data-book]').forEach(i=>{ prev[i.dataset.book] = i.value; });
+  el.innerHTML = books.map(b=>`<div class="field"><label>${escHtml(b.name)} 本金 (HKD)</label><input type="number" step="0.01" placeholder="0" data-book="${b.id}" value="${prev[b.id]||''}"></div>`).join('');
+}
+
+function addJointFund(){
+  const name = document.getElementById('jfName').value.trim();
+  const holdings = [];
+  document.querySelectorAll('#jfHoldingInputs input[data-book]').forEach(i=>{
+    const v = parseFloat(i.value);
+    if(!isNaN(v) && v > 0){
+      const b = books.find(x=>x.id===i.dataset.book);
+      holdings.push({ id:b.id, name:b.name, principal:v });
+    }
+  });
+  if(!name || holdings.length===0){ alert('請填基金名稱，同埋最少一位成員嘅本金'); return; }
+  account.jointFunds.push({ id: Date.now(), name, holdings, payouts: [] });
+  saveAccount();
+  document.getElementById('jfName').value = '';
+  document.querySelectorAll('#jfHoldingInputs input[data-book]').forEach(i=>{ i.value=''; });
+  renderAccountPanel();
+}
+
+function editJointFund(fundId){
+  const f = account.jointFunds.find(x=>x.id===fundId);
+  if(!f) return;
+  const name = prompt('基金名稱：', f.name);
+  if(name===null) return;
+  const holdings = [];
+  for(const b of books){
+    const cur = f.holdings.find(h=>h.id===b.id);
+    const v = prompt(`${b.name} 本金 (HKD)：（0 或留空 = 冇份）`, cur ? cur.principal : '');
+    if(v===null) return;
+    const n = parseFloat(v);
+    if(!isNaN(n) && n > 0) holdings.push({ id:b.id, name:b.name, principal:n });
+  }
+  if(!name.trim() || holdings.length===0){ alert('資料有誤，未有更新'); return; }
+  f.name = name.trim();
+  f.holdings = holdings;
+  saveAccount();
+  renderAccountPanel();
+}
+
+function removeFundPayoutTx(fundId, ym){
+  const key = fundId + ':' + ym;
+  books.forEach(b=>{
+    const ledger = getLedger(b.id);
+    const before = ledger.transactions.length;
+    ledger.transactions = ledger.transactions.filter(t=>t.fundPayout !== key);
+    if(ledger.transactions.length !== before) putLedger(b.id, ledger);
+  });
+}
+
+function deleteJointFund(fundId){
+  const f = account.jointFunds.find(x=>x.id===fundId);
+  if(!f) return;
+  if(!confirm(`確定刪除共同基金「${f.name}」？佢嘅派息記錄（包括各人存摺入面嗰啲 Fund Yield）會一併刪除`)) return;
+  f.payouts.forEach(p=>removeFundPayoutTx(fundId, p.ym));
+  account.jointFunds = account.jointFunds.filter(x=>x.id!==fundId);
+  saveAccount();
+  render();
+}
+
+function deleteFundPayout(fundId, ym){
+  const f = account.jointFunds.find(x=>x.id===fundId);
+  if(!f || !confirm(`確定刪除「${f.name}」${ym} 嘅派息分配？各人存摺入面嗰筆記錄會一併刪除`)) return;
+  removeFundPayoutTx(fundId, ym);
+  f.payouts = f.payouts.filter(p=>p.ym!==ym);
+  saveAccount();
+  render();
+}
+
+let fundDraft = null;
+function previewFundPayout(){
+  const fundId = Number(document.getElementById('fpFund').value);
+  const ym = document.getElementById('fpMonth').value;
+  const amount = parseFloat(document.getElementById('fpAmount').value);
+  const f = account.jointFunds.find(x=>x.id===fundId);
+  if(!f){ alert('請先新增共同基金'); return; }
+  if(!ym || isNaN(amount) || amount<=0){ alert('請揀派息月份同輸入實收派息'); return; }
+  const total = fundPrincipalTotal(f);
+  const alloc = f.holdings.map(h=>({ id:h.id, name:h.name, principal:h.principal, pct: h.principal/total*100, amount: round2(amount*h.principal/total) }));
+  const residue = round2(amount - alloc.reduce((a,x)=>a + x.amount, 0));
+  if(residue !== 0){
+    const lily = cardHolderBookId(false);
+    const target = alloc.find(x=>x.id===lily) || alloc.slice().sort((a,b)=>b.principal-a.principal)[0];
+    target.amount = round2(target.amount + residue);
+  }
+  fundDraft = { fundId, ym, amount, alloc };
+  renderFundPayoutPreview();
+}
+
+function renderFundPayoutPreview(){
+  const el = document.getElementById('fundPayoutPreview');
+  if(!fundDraft){ el.innerHTML = ''; return; }
+  const f = account.jointFunds.find(x=>x.id===fundDraft.fundId);
+  const [y,m] = fundDraft.ym.split('-');
+  const exists = f.payouts.some(p=>p.ym===fundDraft.ym);
+  el.innerHTML = `
+    <div style="margin-top:12px;padding:12px;border:1px dashed var(--sage);border-radius:8px;background:var(--paper-2);">
+      <div style="font-size:13px;font-weight:700;margin-bottom:6px;">${escHtml(f.name)} ${y}年${parseInt(m,10)}月 派息 ${fmt(fundDraft.amount)} 分配預覽</div>
+      <div class="table-scroll" style="margin-top:0;">
+      <table class="acct-tbl">
+        <thead><tr><th>成員</th><th class="num">本金</th><th class="num">佔比</th><th class="num">分到派息</th></tr></thead>
+        <tbody>${fundDraft.alloc.map(a=>`<tr><td>${escHtml(a.name)}</td><td class="num">${fmt(a.principal)}</td><td class="num">${a.pct.toFixed(2)}%</td><td class="num">${fmt(a.amount)}</td></tr>`).join('')}</tbody>
+      </table>
+      </div>
+      ${exists ? `<div class="acct-hint" style="color:var(--stamp);">呢個月已經分配過，確認會取代舊嘅分配記錄。</div>` : ''}
+      <div style="display:flex;gap:8px;margin-top:10px;">
+        <button class="btn small stamp" onclick="confirmFundPayout()">確認入帳</button>
+        <button class="btn small ghost" onclick="fundDraft=null;renderFundPayoutPreview();">取消</button>
+      </div>
+    </div>`;
+}
+
+function confirmFundPayout(){
+  if(!fundDraft) return;
+  const f = account.jointFunds.find(x=>x.id===fundDraft.fundId);
+  if(!f) return;
+  const { ym, amount, alloc } = fundDraft;
+  removeFundPayoutTx(f.id, ym);
+  f.payouts = f.payouts.filter(p=>p.ym!==ym);
+  const monthEnd = ym + '-' + String(daysInMonth(ym)).padStart(2,'0');
+  const baseId = Date.now();
+  alloc.forEach((a,i)=>{
+    if(a.amount === 0) return;
+    const ledger = getLedger(a.id);
+    ledger.transactions.push({
+      id: baseId + i, date: monthEnd, type:'income', category:'Fund Yield',
+      note: `${f.name} ${ym} 派息分配（本金 ${fmt(a.principal)}，佔 ${a.pct.toFixed(2)}%），留喺基金戶口`,
+      amount: a.amount, settled: true, toFund: f.id, fundPayout: f.id + ':' + ym
+    });
+    putLedger(a.id, ledger);
+  });
+  f.payouts.push({ ym, amount, postedOn: todayStr(), alloc: alloc.map(a=>({ id:a.id, name:a.name, amount:a.amount })) });
+  f.payouts.sort((a,b)=>b.ym.localeCompare(a.ym));
+  saveAccount();
+  fundDraft = null;
+  renderFundPayoutPreview();
+  render();
+}
+
+function renderJointFunds(){
+  const list = document.getElementById('jointFundsList');
+  if(!list) return;
+  renderJointFundInputs();
+  const sel = document.getElementById('fpFund');
+  const prevSel = sel.value;
+  sel.innerHTML = account.jointFunds.map(f=>`<option value="${f.id}">${escHtml(f.name)}</option>`).join('') || '<option value="">（未有共同基金）</option>';
+  if([...sel.options].some(o=>o.value===prevSel)) sel.value = prevSel;
+
+  if(account.jointFunds.length===0){
+    list.innerHTML = '<div class="empty-hint">未有共同基金，喺下面新增一隻，填返每人出咗幾多本金</div>';
+    document.getElementById('fundSummaryLine').textContent = '';
+    return;
+  }
+  let grand = 0;
+  list.innerHTML = account.jointFunds.map(f=>{
+    const total = fundPrincipalTotal(f);
+    const paidTotal = f.payouts.reduce((a,p)=>a + p.amount, 0);
+    grand += total + paidTotal;
+    const last = f.payouts[0];
+    const rows = f.holdings.map(h=>{
+      const paid = fundPaidTo(f, h.id);
+      const lastAmt = last ? (last.alloc.find(x=>x.id===h.id)?.amount || 0) : 0;
+      return `<tr><td>${escHtml(books.find(b=>b.id===h.id)?.name || h.name)}</td><td class="num">${fmt(h.principal)}</td><td class="num">${(h.principal/total*100).toFixed(1)}%</td><td class="num">${fmt(lastAmt)}</td><td class="num">${fmt(paid)}</td><td class="num"><b>${fmt(h.principal + paid)}</b></td></tr>`;
+    }).join('');
+    const history = f.payouts.map(p=>{
+      const [y,m] = p.ym.split('-');
+      return `<div style="display:flex;gap:8px;align-items:baseline;padding:5px 0;border-bottom:1px dashed var(--line);font-size:12px;flex-wrap:wrap;">
+        <b style="min-width:80px;">${y}年${parseInt(m,10)}月</b>
+        <span style="font-family:'JetBrains Mono',monospace;">${fmt(p.amount)}</span>
+        <span style="flex:1;color:var(--ink-2);">${p.alloc.map(a=>`${escHtml(a.name)} ${fmt(a.amount)}`).join(' ・ ')}</span>
+        <button class="del-btn" onclick="deleteFundPayout(${f.id}, '${p.ym}')" title="刪除呢次派息分配">✕</button>
+      </div>`;
+    }).join('');
+    return `
+      <div class="save-card" style="margin-bottom:12px;">
+        <button class="del-btn rm" onclick="deleteJointFund(${f.id})" title="刪除基金" style="right:10px;">✕</button>
+        <button class="del-btn rm" onclick="editJointFund(${f.id})" title="編輯本金" style="right:34px;">✏️</button>
+        <div class="bank">${escHtml(f.name)}</div>
+        <div class="who">本金合計 ${fmt(total)} ・ 累計派息 ${fmt(paidTotal)}${last ? ` ・ 最近派息 ${last.ym}` : ''}</div>
+        <div class="table-scroll" style="margin-top:0;">
+        <table class="acct-tbl">
+          <thead><tr><th>成員</th><th class="num">本金</th><th class="num">佔比</th><th class="num">${last ? '最近派息' : '本月派息'}</th><th class="num">累計派息</th><th class="num">基金結餘</th></tr></thead>
+          <tbody>${rows}
+            <tr class="total"><td>合計</td><td class="num">${fmt(total)}</td><td class="num">100%</td><td class="num">${fmt(last ? last.amount : 0)}</td><td class="num">${fmt(paidTotal)}</td><td class="num">${fmt(total + paidTotal)}</td></tr>
+          </tbody>
+        </table>
+        </div>
+        ${history ? `<div style="font-size:11.5px;color:var(--ink-2);margin:10px 0 2px;">已派息記錄</div>${history}` : ''}
+      </div>`;
+  }).join('');
+  document.getElementById('fundSummaryLine').textContent = '基金結餘合計 ' + fmt(grand);
 }
 
 function renderInterestHistory(){
@@ -1324,6 +1569,7 @@ function editTx(id){
   const t = data.transactions.find(x=>x.id===id);
   if(!t) return;
   if(t.type==='transfer' || t.reimburseOf){ alert('還款記錄唔可以編輯；如果有錯，可以喺「自己家庭」刪除嗰筆還款，再重新撳「由家庭資金還款」'); return; }
+  if(t.fundPayout){ alert('基金派息記錄唔可以單獨編輯；請喺「📈 共同基金」重新計同一個月份，會自動取代舊記錄'); return; }
   if(t.interestRun){ alert('利息分配記錄唔可以單獨編輯；請喺「🏦 共用銀行戶口總覽」重新計同一個月份，會自動取代舊記錄'); return; }
   editingTxId = id;
   document.getElementById('txDate').value = t.date;
@@ -1361,6 +1607,7 @@ function delTx(id){
     alert('呢筆信用卡代墊已經還咗款，要刪除請先刪除嗰筆「信用卡代墊還款」記錄。');
     return;
   }
+  if(t.fundPayout){ alert('呢筆係共同基金派息分配，請喺「📈 共同基金」嘅派息記錄刪除成次分配。'); return; }
   if(t.interestRun && !confirm('呢筆係共用戶口利息分配，淨係刪除呢筆會令分配加總唔等於銀行實收。建議喺「戶口總覽」刪除成次分配。仍然刪除？')) return;
   if(t.reimburseOf){
     alert('呢筆係屋企還信用卡代墊嘅收入，要刪除請去「自己家庭」刪除嗰筆「信用卡代墊還款」，兩邊會一齊刪。');
@@ -1674,7 +1921,7 @@ function render(){
         <td data-label="日期">${t.date}</td>
         <td data-label="項目/備註">
           <div style="text-align:left;">
-            <span class="cat-badge">${t.category || 'Others'}</span>${t.payer==='card' ? '<span class="tag card">💳 信用卡</span>' : ''}${t.owner==='personal' ? '<span class="tag personal">個人</span>' : ''}${t.payer==='card' && t.owner!=='personal' && t.type==='expense' ? (t.reimbursedBy ? '<span class="tag paid">已還</span>' : '<span class="tag card">未還</span>') : ''}${t.type==='transfer' ? '<span class="tag xfer">轉去'+escHtml(books.find(b=>b.id===t.payee)?.name || 'Lily')+'</span>' : ''}${t.reimburseOf ? '<span class="tag xfer">屋企還款</span>' : ''}${t.toSaving ? '<span class="tag xfer">入活期：'+escHtml(data.savings.find(sv=>sv.id===t.toSaving)?.bank || '已刪除')+'</span>' : ''}${t.fromSaving ? '<span class="tag xfer">活期扣：'+escHtml(data.savings.find(sv=>sv.id===t.fromSaving)?.bank || '已刪除')+'</span>' : ''}
+            <span class="cat-badge">${t.category || 'Others'}</span>${t.payer==='card' ? '<span class="tag card">💳 信用卡</span>' : ''}${t.owner==='personal' ? '<span class="tag personal">個人</span>' : ''}${t.payer==='card' && t.owner!=='personal' && t.type==='expense' ? (t.reimbursedBy ? '<span class="tag paid">已還</span>' : '<span class="tag card">未還</span>') : ''}${t.type==='transfer' ? '<span class="tag xfer">轉去'+escHtml(books.find(b=>b.id===t.payee)?.name || 'Lily')+'</span>' : ''}${t.reimburseOf ? '<span class="tag xfer">屋企還款</span>' : ''}${t.toFund ? '<span class="tag xfer">留喺基金：'+escHtml(account.jointFunds.find(f=>f.id===t.toFund)?.name || '已刪除')+'</span>' : ''}${t.toSaving ? '<span class="tag xfer">入活期：'+escHtml(data.savings.find(sv=>sv.id===t.toSaving)?.bank || '已刪除')+'</span>' : ''}${t.fromSaving ? '<span class="tag xfer">活期扣：'+escHtml(data.savings.find(sv=>sv.id===t.fromSaving)?.bank || '已刪除')+'</span>' : ''}
             ${t.note ? `<span class="tx-note">${t.note}</span>` : ''}
           </div>
         </td>
@@ -1682,7 +1929,7 @@ function render(){
         <td class="amt plus" data-label="收入">${t.type==='income'?fmt(t.amount):''}</td>
         <td class="amt bal" data-label="結餘">${fmt(t.runningBalance)}</td>
         <td data-label="狀態" style="text-align:center;font-size:11px;">
-          ${t.fromSaving || t.toSaving ? `<span style="color:var(--income);white-space:nowrap;">${t.fromSaving ? '已扣活期' : '已入活期'}</span>` : `<label style="display:flex;align-items:center;gap:4px;justify-content:center;cursor:pointer;white-space:nowrap;">
+          ${t.fromSaving || t.toSaving || t.toFund ? `<span style="color:var(--income);white-space:nowrap;">${t.fromSaving ? '已扣活期' : t.toSaving ? '已入活期' : '已入基金'}</span>` : `<label style="display:flex;align-items:center;gap:4px;justify-content:center;cursor:pointer;white-space:nowrap;">
             <input type="checkbox" ${t.isSettled?'checked':''} onchange="toggleSettled(${t.id}, this.checked)">
             <span style="color:${t.isSettled?'var(--income)':'var(--gold)'};">${t.isSettled?'已結算':'待結算'}</span>
           </label>`}
@@ -1739,7 +1986,12 @@ function render(){
   const savingsTotal = data.savings.reduce((a,s)=>a + s.principal, 0);
   document.getElementById('sumSavings').textContent = fmt(savingsTotal);
 
-  const fundsTotal = data.funds.reduce((a,f)=>a + f.principal + fundAccrued(f), 0);
+  // 獨立基金（本金＋應計）＋ 共同基金入面屬於呢位成員嘅本金同累計派息
+  const jointFundShare = account.jointFunds.reduce((a,f)=>{
+    const h = f.holdings.find(x=>x.id===currentBook);
+    return a + (h ? h.principal : 0) + fundPaidTo(f, currentBook);
+  }, 0);
+  const fundsTotal = data.funds.reduce((a,f)=>a + f.principal + fundAccrued(f), 0) + jointFundShare;
   document.getElementById('sumFunds').textContent = fmt(fundsTotal);
 
   const grandTotal = balance + savingsTotal;
@@ -1823,6 +2075,10 @@ document.getElementById('stmtDate').value = todayStr();
   const d = new Date(); d.setDate(1); d.setMonth(d.getMonth()-1);
   document.getElementById('intMonth').value = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0');
   document.getElementById('rollMonth').value = todayYm();
+  document.getElementById('fpMonth').value = d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0');
+  const fpanel = document.getElementById('fundPanel');
+  try{ if(localStorage.getItem('ui:fundOpen')==='1') fpanel.open = true; }catch(e){}
+  fpanel.addEventListener('toggle', ()=>{ try{ localStorage.setItem('ui:fundOpen', fpanel.open?'1':'0'); }catch(e){} });
   const panel = document.getElementById('acctPanel');
   try{ if(localStorage.getItem('ui:acctOpen')==='1') panel.open = true; }catch(e){}
   panel.addEventListener('toggle', ()=>{ try{ localStorage.setItem('ui:acctOpen', panel.open?'1':'0'); }catch(e){} });
