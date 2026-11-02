@@ -490,6 +490,9 @@
           <option value="personal">我個人使費</option>
         </select>
       </div>
+      <div class="field" id="fundLinkField" style="display:none;"><label>加入基金結餘</label>
+        <select id="txFundLink"></select>
+      </div>
       <div class="field" id="sourceField" style="display:none;"><label>扣款來源</label>
         <select id="txSource"></select>
       </div>
@@ -858,16 +861,28 @@ function updateSourceField(){
   const isExpense = document.getElementById('txType').value === 'expense';
   const isCard = document.getElementById('txPayer').value === 'card' && currentBook === cardExpenseBookId();
   document.getElementById('sourceField').style.display = (isExpense && !isCard && data.savings.length>0) ? '' : 'none';
+
+  // 收入可以指定係邊隻基金嘅派息：獨立基金（呢本簿嘅基金卡）或者呢位成員有份嘅共同基金
+  const fsel = document.getElementById('txFundLink');
+  const fprev = fsel.value;
+  const ownFunds = data.funds.map(f=>`<option value="f:${f.id}">加入：${escHtml(f.name)}</option>`);
+  const jointFunds = account.jointFunds.filter(f=>f.holdings.some(h=>h.id===currentBook))
+    .map(f=>`<option value="j:${f.id}">加入：${escHtml(f.name)}（共同基金）</option>`);
+  fsel.innerHTML = '<option value="">—（唔指定）</option>' + ownFunds.join('') + jointFunds.join('');
+  if([...fsel.options].some(o=>o.value===fprev)) fsel.value = fprev;
+  document.getElementById('fundLinkField').style.display = (!isExpense && (ownFunds.length + jointFunds.length) > 0) ? '' : 'none';
 }
 /* 獨立基金卡嘅派息（包括以前撳「派息入現金」記低嗰啲）：錢一直留喺基金戶口，唔計現金結餘 */
-function isFundYieldKept(t){ return t.type==='income' && t.category==='Fund Yield' && !t.toFund; }
+function isFundYieldKept(t){ return t.type==='income' && !t.toFund && (t.category==='Fund Yield' || !!t.fundId); }
 function keptFundYield(ledger){
   return ledger.transactions.filter(t=>isFundYieldKept(t) && t.settled !== false).reduce((a,t)=>a + t.amount, 0);
 }
-/* 某隻獨立基金已經記咗入簿嘅派息：新記錄用 fundId 連住；舊記錄冇 fundId，就按備註開頭嘅基金名配對 */
+/* 某隻獨立基金已經記咗入簿嘅派息：有 fundId 就跟 fundId；舊記錄冇 fundId，就按備註開頭嘅基金名配對，
+   本簿得一隻獨立基金嘅話，冇連住嘅派息都當係佢嘅 */
 function fundYieldOf(f, ledger){
+  const onlyFund = ledger.funds.length === 1;
   return ledger.transactions.filter(t=>isFundYieldKept(t) && t.settled !== false &&
-    (t.fundId === f.id || (!t.fundId && (t.note||'').startsWith(f.name + ' 每月派息'))))
+    (t.fundId === f.id || (!t.fundId && (onlyFund || (t.note||'').startsWith(f.name + ' 每月派息')))))
     .reduce((a,t)=>a + t.amount, 0);
 }
 function isFamilyExpense(t){ return t.type==='expense' && t.owner !== 'personal'; }
@@ -1193,7 +1208,11 @@ function deleteInterestRun(ym){
 /* ===================== 共同基金：按本金比例分派息 ===================== */
 function fundPrincipalTotal(f){ return f.holdings.reduce((a,h)=>a + h.principal, 0); }
 function fundPaidTo(f, bookId){
-  return f.payouts.reduce((a,p)=>a + (p.alloc.find(x=>x.id===bookId)?.amount || 0), 0);
+  const fromPayouts = f.payouts.reduce((a,p)=>a + (p.alloc.find(x=>x.id===bookId)?.amount || 0), 0);
+  // 自己指定屬於呢隻共同基金嘅派息記錄（例如喺用共同基金之前已經記低嗰啲）
+  const linked = getLedger(bookId).transactions
+    .filter(t=>t.toFund===f.id && !t.fundPayout && t.settled !== false).reduce((a,t)=>a + t.amount, 0);
+  return fromPayouts + linked;
 }
 /* 每人喺共同基金嘅結餘 ＝ 本金 ＋ 累計派息（派息留喺基金戶口）；另加佢自己存摺入面嘅獨立基金本金 */
 function memberFundTotal(bookId){
@@ -1368,7 +1387,7 @@ function renderJointFunds(){
   let grand = 0;
   list.innerHTML = account.jointFunds.map(f=>{
     const total = fundPrincipalTotal(f);
-    const paidTotal = f.payouts.reduce((a,p)=>a + p.amount, 0);
+    const paidTotal = f.holdings.reduce((a,h)=>a + fundPaidTo(f, h.id), 0);
     grand += total + paidTotal;
     const last = f.payouts[0];
     const rows = f.holdings.map(h=>{
@@ -1546,6 +1565,12 @@ function addTx(){
   const owner = isFamilyBook && type==='expense' ? document.getElementById('txOwner').value : 'family';
   const srcVal = document.getElementById('sourceField').style.display !== 'none' ? document.getElementById('txSource').value : '';
   const fromSaving = type==='expense' && payer!=='card' && srcVal ? Number(srcVal) : null;
+  const fundLinkVal = type==='income' && document.getElementById('fundLinkField').style.display !== 'none' ? document.getElementById('txFundLink').value : '';
+  const applyFundLink = t => {
+    delete t.fundId; delete t.toFund;
+    if(fundLinkVal.startsWith('f:')){ t.fundId = Number(fundLinkVal.slice(2)); t.settled = true; }
+    else if(fundLinkVal.startsWith('j:')){ t.toFund = Number(fundLinkVal.slice(2)); t.settled = true; }
+  };
   if(category === 'Others' && otherCat) category = otherCat;
   if(!date || !isValidDateStr(date) || !category || isNaN(amount) || amount<=0){
     alert('請填妥日期（格式 YYYY-MM-DD）、項目同金額');
@@ -1562,12 +1587,14 @@ function addTx(){
       Object.assign(t, {date, type, category, note, amount, payer, owner});
       if(fromSaving){ t.fromSaving = fromSaving; t.settled = true; adjustSaving(fromSaving, -amount); }
       else delete t.fromSaving;
+      applyFundLink(t);
     }
     cancelEditTx();
   }else{
     const t = {id:Date.now(), date, type, category, note, amount, payer, owner, settled:false};
     // 喺活期本金度扣嘅支出即時扣本金，當已結算
     if(fromSaving){ t.fromSaving = fromSaving; t.settled = true; adjustSaving(fromSaving, -amount); }
+    applyFundLink(t);
     data.transactions.push(t);
     document.getElementById('txOtherCat').value='';
     document.getElementById('txNote').value='';
@@ -1598,6 +1625,9 @@ function editTx(id){
   document.getElementById('txOwner').value = t.owner || 'family';
   updateSourceField();
   document.getElementById('txSource').value = t.fromSaving && data.savings.some(sv=>sv.id===t.fromSaving) ? String(t.fromSaving) : '';
+  const linkVal = t.toFund ? 'j:'+t.toFund : t.fundId ? 'f:'+t.fundId : '';
+  const fsel = document.getElementById('txFundLink');
+  fsel.value = [...fsel.options].some(o=>o.value===linkVal) ? linkVal : '';
   document.getElementById('txSubmitBtn').textContent = '更新記錄';
   document.getElementById('txCancelEditBtn').style.display = 'inline-flex';
   document.getElementById('txDate').scrollIntoView({behavior:'smooth', block:'center'});
@@ -2067,7 +2097,7 @@ function render(){
         <div class="row"><span>每月派息</span><b>${fmt(monthly)}</b></div>
         <div class="row"><span>下次派息日</span><b>${nextPayout.toISOString().slice(0,10)}</b></div>
         <div class="row"><span>已記派息（留喺基金）</span><b>${fmt(fundYieldOf(f, data))}</b></div>
-        <div class="row"><span>基金結餘（本金＋已記派息）</span><b>${fmt(f.principal + fundYieldOf(f, data))}</b></div>
+        <div class="row"><span>基金結餘（本金＋派息）</span><b>${fmt(f.principal + fundYieldOf(f, data))}</b></div>
         <div class="accrued">
           <span style="font-size:11px;color:var(--ink-2)">本月應計</span>
           <span class="val">${fmt(accrued)}</span>
