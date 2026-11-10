@@ -382,7 +382,7 @@
       <div class="table-scroll" style="margin-top:0;">
         <table class="acct-tbl" id="acctSharesTbl"></table>
       </div>
-      <p class="acct-hint">「戶口份額」＝ 現金（每本存摺嘅現金結餘，只計已結算）＋ 活期（活期本金），唔包括基金。取消剔選「喺戶口」嘅成員唔會計入合計，亦唔會分到利息。</p>
+      <p class="acct-hint">「戶口份額」＝ 現金（每本存摺嘅現金結餘，只計已結算）＋ 活期（活期本金），唔包括基金。取消剔選「喺戶口」嘅成員唔會計入合計，亦唔會分到利息。如果某位成員嘅現金放喺另一個戶口，就剔走佢嘅「現金喺此戶口」：佢嘅現金唔計入份額、對數、利息分配同每月結餘表，但仍然計入佢嘅「總資產」。</p>
 
       <h2 class="section">每月結餘（承上／轉下）</h2>
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
@@ -939,6 +939,28 @@ function round2(n){ return Math.round(n*100)/100; }
 function escHtml(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function daysInMonth(ym){ const [y,m] = ym.split('-').map(Number); return new Date(y, m, 0).getDate(); }
 
+/* 「現金喺共用戶口」剔走咗嘅成員（例如妹妹啲現金放喺第二個戶口）：
+   共用戶口份額、對數、利息分配同每月結餘表淨係計佢嘅活期本金 */
+function isCashOutside(bookId){ return books.find(b=>b.id===bookId)?.cashOutside === true; }
+function txAcctEffect(t, ledger, outside){
+  if(!outside) return txTotalEffect(t, ledger);
+  if(t.settled === false) return 0;
+  if(t.fromSaving && ledger.savings.some(s=>s.id===t.fromSaving)) return -t.amount;
+  if(t.toSaving && ledger.savings.some(s=>s.id===t.toSaving)) return t.amount;
+  return 0;
+}
+function acctShare(bookId){
+  const br = bookBreakdown(bookId);
+  return isCashOutside(bookId) ? br.savings : br.total;
+}
+function toggleCashInAccount(bookId, checked){
+  const b = books.find(x=>x.id===bookId);
+  if(!b) return;
+  if(checked) delete b.cashOutside; else b.cashOutside = true;
+  saveBooksList();
+  render();
+}
+
 function toggleInAccount(bookId, checked){
   const b = books.find(x=>x.id===bookId);
   if(!b) return;
@@ -954,14 +976,15 @@ function prevMonthEnd(ym){
   return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
 }
 /* 由而家嘅總額倒推：某月 承上 ＝ 上月尾結餘，轉下 ＝ 本月尾結餘；中間按記錄分存入／利息／支出 */
-function monthRollforward(bookId, ym){
+function monthRollforward(bookId, ym, acctOnly){
   const ledger = getLedger(bookId);
-  const now = computeBookTotal(bookId);
+  const outside = acctOnly && isCashOutside(bookId);
+  const now = acctOnly ? acctShare(bookId) : computeBookTotal(bookId);
   const monthEnd = ym + '-' + String(daysInMonth(ym)).padStart(2,'0');
   const bfDate = prevMonthEnd(ym);
   let afterBf = 0, afterCf = 0, inflow = 0, interest = 0, outflow = 0;
   ledger.transactions.forEach(t=>{
-    const e = txTotalEffect(t, ledger);
+    const e = txAcctEffect(t, ledger, outside);
     if(e === 0) return;
     if(t.date > bfDate) afterBf += e;
     if(t.date > monthEnd) afterCf += e;
@@ -978,7 +1001,7 @@ function renderRollTable(){
   const tbl = document.getElementById('rollTbl');
   const ym = document.getElementById('rollMonth').value;
   if(!tbl || !ym) return;
-  const rows = acctBooks().map(b=>({ b, r: monthRollforward(b.id, ym) }));
+  const rows = acctBooks().map(b=>({ b, r: monthRollforward(b.id, ym, true) }));
   const sum = k => rows.reduce((a,x)=>a + x.r[k], 0);
   const cell = (v, cls) => `<td class="num ${cls||''}">${fmt(v)}</td>`;
   tbl.innerHTML = `
@@ -1005,27 +1028,33 @@ function renderBookRoll(ym){
 function renderAccountPanel(){
   const tbl = document.getElementById('acctSharesTbl');
   if(!tbl) return;
-  const rows = books.map(b=>({ b, ...bookBreakdown(b.id), fund: memberFundTotal(b.id), inAcct: b.inAccount !== false }));
+  const rows = books.map(b=>{
+    const br = bookBreakdown(b.id);
+    const outside = b.cashOutside === true;
+    return { b, ...br, outside, share: outside ? br.savings : br.total, fund: memberFundTotal(b.id), inAcct: b.inAccount !== false };
+  });
   const sumFund = rows.reduce((a,r)=>a + r.fund, 0);
-  const sum = rows.filter(r=>r.inAcct).reduce((a,r)=>a + r.total, 0);
-  const sumCash = rows.filter(r=>r.inAcct).reduce((a,r)=>a + r.cash, 0);
+  const sum = rows.filter(r=>r.inAcct).reduce((a,r)=>a + r.share, 0);
+  const sumCash = rows.filter(r=>r.inAcct && !r.outside).reduce((a,r)=>a + r.cash, 0);
+  const sumAssets = rows.reduce((a,r)=>a + r.total + r.fund, 0);
   const sumSav = rows.filter(r=>r.inAcct).reduce((a,r)=>a + r.savings, 0);
   const cardOwed = books.reduce((a,b)=> a + getLedger(b.id).transactions.filter(isCardOwed).reduce((x,t)=>x+t.amount,0), 0);
   tbl.innerHTML = `
-    <thead><tr><th>喺戶口</th><th>成員</th><th class="num">現金</th><th class="num">活期</th><th class="num">戶口份額</th><th class="num">佔比</th><th class="num">基金</th><th class="num">總資產</th></tr></thead>
+    <thead><tr><th>喺戶口</th><th>成員</th><th title="剔走 = 呢位成員嘅現金放喺另一個戶口">現金喺此戶口</th><th class="num">現金</th><th class="num">活期</th><th class="num">戶口份額</th><th class="num">佔比</th><th class="num">基金</th><th class="num">總資產</th></tr></thead>
     <tbody>
       ${rows.map(r=>`
         <tr style="${r.inAcct?'':'opacity:.5;'}">
           <td><input type="checkbox" ${r.inAcct?'checked':''} onchange="toggleInAccount('${r.b.id}', this.checked)"></td>
           <td><span style="display:inline-block;width:9px;height:9px;border-radius:3px;background:${r.b.color};margin-right:6px;"></span>${escHtml(r.b.name)}</td>
-          <td class="num">${fmt(r.cash)}</td>
+          <td style="text-align:center;"><input type="checkbox" ${r.outside?'':'checked'} onchange="toggleCashInAccount('${r.b.id}', this.checked)"></td>
+          <td class="num" style="${r.outside?'color:var(--ink-2);':''}">${fmt(r.cash)}${r.outside?'<div style="font-size:10px;">第二戶口，唔計</div>':''}</td>
           <td class="num">${fmt(r.savings)}</td>
-          <td class="num"><b>${fmt(r.total)}</b></td>
-          <td class="num">${r.inAcct && sum>0 ? (r.total/sum*100).toFixed(1)+'%' : '—'}</td>
+          <td class="num"><b>${fmt(r.share)}</b></td>
+          <td class="num">${r.inAcct && sum>0 ? (r.share/sum*100).toFixed(1)+'%' : '—'}</td>
           <td class="num">${fmt(r.fund)}</td>
           <td class="num"><b>${fmt(r.total + r.fund)}</b></td>
         </tr>`).join('')}
-      <tr class="total"><td></td><td>合計</td><td class="num">${fmt(sumCash)}</td><td class="num">${fmt(sumSav)}</td><td class="num">${fmt(sum)}</td><td class="num">100%</td><td class="num">${fmt(sumFund)}</td><td class="num">${fmt(sum + sumFund)}</td></tr>
+      <tr class="total"><td></td><td>合計</td><td></td><td class="num">${fmt(sumCash)}</td><td class="num">${fmt(sumSav)}</td><td class="num">${fmt(sum)}</td><td class="num">100%</td><td class="num">${fmt(sumFund)}</td><td class="num">${fmt(sumAssets)}</td></tr>
     </tbody>`;
 
   const recon = document.getElementById('acctRecon');
@@ -1067,14 +1096,15 @@ function avgDailyBalance(bookId, ym){
   // 由而家嘅總額（現金＋活期）倒推：某日結餘 ＝ 而家總額 − 嗰日之後記錄嘅影響。
   // 咁樣喺活期本金度直接扣嘅支出都會按日期計返啱
   const ledger = getLedger(bookId);
+  const outside = isCashOutside(bookId);
   const excluded = ledger.transactions.filter(t=>t.interestRun === ym);
-  const base = computeBookTotal(bookId) - excluded.reduce((a,t)=>a + txTotalEffect(t, ledger), 0);
+  const base = acctShare(bookId) - excluded.reduce((a,t)=>a + txAcctEffect(t, ledger, outside), 0);
   const txs = ledger.transactions.filter(t=>t.interestRun !== ym);
   const n = daysInMonth(ym);
   let total = 0;
   for(let d=1; d<=n; d++){
     const ds = ym + '-' + String(d).padStart(2,'0');
-    const after = txs.filter(t=>t.date > ds).reduce((a,t)=>a + txTotalEffect(t, ledger), 0);
+    const after = txs.filter(t=>t.date > ds).reduce((a,t)=>a + txAcctEffect(t, ledger, outside), 0);
     total += base - after;
   }
   return total / n;
@@ -2031,10 +2061,13 @@ function render(){
   const fundsTotal = data.funds.reduce((a,f)=>a + f.principal, 0) + keptFundYield(data) + jointFundShare;
   document.getElementById('sumFunds').textContent = fmt(fundsTotal);
 
-  const grandTotal = balance + savingsTotal;
+  // 現金放喺第二個戶口嘅成員：總結餘淨係計活期本金，現金另外列出
+  const cashOutside = isCashOutside(currentBook);
+  const grandTotal = cashOutside ? savingsTotal : balance + savingsTotal;
   document.getElementById('sumGrand').textContent = fmt(grandTotal);
-  document.getElementById('grandBreakdown').innerHTML =
-    `現金 ${fmt(balance)} ＋ 活期本金 ${fmt(savingsTotal)}（基金 ${fmt(fundsTotal)} 另計，唔計入總結餘）`;
+  document.getElementById('grandBreakdown').innerHTML = cashOutside
+    ? `活期本金 ${fmt(savingsTotal)}（第二戶口現金 ${fmt(balance)}、基金 ${fmt(fundsTotal)} 另計，唔計入總結餘）`
+    : `現金 ${fmt(balance)} ＋ 活期本金 ${fmt(savingsTotal)}（基金 ${fmt(fundsTotal)} 另計，唔計入總結餘）`;
 
   renderChart(monthExpenseTx, ym);
   renderBookRoll(ym);
